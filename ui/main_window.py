@@ -17,7 +17,7 @@ from PySide6.QtWidgets import (
     QFormLayout, QTreeWidget, QTreeWidgetItem, QFileDialog, QInputDialog,
     QMessageBox, QScrollArea, QStyle, QGraphicsDropShadowEffect, QSlider, QGroupBox, QColorDialog, QDialog
 )
-from PySide6.QtCore import Qt, QDate, QSize, QTimer
+from PySide6.QtCore import Qt, QDate, QSize, QTimer, Signal, QThread
 from PySide6.QtCore import QItemSelectionModel
 from PySide6.QtGui import QColor, QPixmap, QFont, QIcon
 
@@ -37,12 +37,12 @@ def _import_panels():
         from models.panels import (
             BinaryDisablePanel, BinarySelectionPanel, AdminPermissionPanel,
             BatchImportPanel, UnknownCategoryAuthorPanel, ConflictResolutionPanel,
-            PriorityAdjustmentPanel, CategoryManagementPanel, ExportSelectionPanel
+            PriorityAdjustmentPanel, CategoryManagementPanel, ExportSelectionPanel, VirtualMappingPriorityPanel
         )
         return (
             BinaryDisablePanel, BinarySelectionPanel, AdminPermissionPanel,
             BatchImportPanel, UnknownCategoryAuthorPanel, ConflictResolutionPanel,
-            PriorityAdjustmentPanel, CategoryManagementPanel, ExportSelectionPanel
+            PriorityAdjustmentPanel, CategoryManagementPanel, ExportSelectionPanel, VirtualMappingPriorityPanel
         )
     except ImportError:
         # 打包环境下的回退方案：尝试多种路径
@@ -76,7 +76,8 @@ def _import_panels():
                 panels_module.ConflictResolutionPanel,
                 panels_module.PriorityAdjustmentPanel,
                 panels_module.CategoryManagementPanel,
-                panels_module.ExportSelectionPanel
+                panels_module.ExportSelectionPanel,
+                panels_module.VirtualMappingPriorityPanel
             )
         except:
             pass
@@ -99,7 +100,8 @@ def _import_panels():
                             panels_module.ConflictResolutionPanel,
                             panels_module.PriorityAdjustmentPanel,
                             panels_module.CategoryManagementPanel,
-                            panels_module.ExportSelectionPanel
+                            panels_module.ExportSelectionPanel,
+                            panels_module.VirtualMappingPriorityPanel
                         )
                 except Exception as e:
                     continue
@@ -117,7 +119,7 @@ def _import_panels():
 (
     BinaryDisablePanel, BinarySelectionPanel, AdminPermissionPanel,
     BatchImportPanel, UnknownCategoryAuthorPanel, ConflictResolutionPanel,
-    PriorityAdjustmentPanel, CategoryManagementPanel, ExportSelectionPanel
+    PriorityAdjustmentPanel, CategoryManagementPanel, ExportSelectionPanel, VirtualMappingPriorityPanel
 ) = _import_panels()
 
 from utils.animation_utils import AnimatedTransition
@@ -147,35 +149,27 @@ class MainWindow(QMainWindow):
             self.animation_manager = DummyAnimationManager()
     
     def get_background_path(self, filename):
-        """获取背景图片路径，兼容开发环境和打包环境"""
+        """获取背景图片路径"""
         if getattr(sys, 'frozen', False):
-            # 打包后的exe环境，使用PyInstaller的临时路径
             return os.path.join(sys._MEIPASS, "background", filename)
         else:
-            # 开发环境
             project_root = self.get_project_root()
             return os.path.join(project_root, "background", filename)
     
     def get_project_root(self):
-        """获取项目根目录，兼容开发环境和打包环境"""
+        """获取项目根目录"""
         if getattr(sys, 'frozen', False):
-            # 打包后的exe环境
             return os.path.dirname(sys.executable)
         else:
-            # 开发环境
             script_dir = os.path.dirname(os.path.abspath(__file__))
-            # ui/main_window.py -> ui -> 项目根目录
-            project_root = os.path.dirname(script_dir)
-            return project_root
+            return os.path.dirname(script_dir)
     
     def set_window_icon(self):
-        """设置窗口图标，兼容开发环境和打包环境"""
+        """设置窗口图标"""
         try:
             if getattr(sys, 'frozen', False):
-                # 打包后的exe环境，使用PyInstaller的临时路径
                 icon_path = os.path.join(sys._MEIPASS, "background", "title.png")
             else:
-                # 开发环境
                 icon_path = self.get_background_path("title.png")
             
             if os.path.exists(icon_path):
@@ -183,8 +177,7 @@ class MainWindow(QMainWindow):
                 if not pixmap.isNull():
                     icon = QIcon(pixmap)
                     self.setWindowIcon(icon)
-        except Exception as e:
-            # 图标设置失败不影响程序运行
+        except Exception:
             pass
     
     def init_ui(self):
@@ -339,6 +332,17 @@ class MainWindow(QMainWindow):
     
     def enable_all_mods(self):
         """全部启用Mod（只启用当前未启用的mod）"""
+        # 先检查游戏目录是否设置
+        if not self.check_game_path_set():
+            from PySide6.QtWidgets import QMessageBox
+            QMessageBox.warning(
+                self,
+                "请先设置游戏目录",
+                "请先设置游戏目录！\n\n将自动打开高级设置界面。"
+            )
+            self.show_advanced_settings_panel()
+            return
+        
         if hasattr(self, 'mod_table'):
             # 只启用当前未启用的mod
             for row, checkbox in self.mod_table.checkbox_widgets.items():
@@ -353,6 +357,12 @@ class MainWindow(QMainWindow):
             
             # 更新统计信息
             self.mod_table.statistics_changed.emit()
+    
+    def check_game_path_set(self):
+        """检查游戏目录是否已设置"""
+        settings = self.load_advanced_settings()
+        game_path = settings.get('game_path', '')
+        return bool(game_path and os.path.exists(game_path))
     
     def batch_disable_mods(self):
         """批量禁用Mod（支持二分禁用）"""
@@ -1006,6 +1016,9 @@ class MainWindow(QMainWindow):
         if hasattr(self, 'virtual_mapping_checkbox'):
             self.virtual_mapping_checkbox.setChecked(current_settings.get('virtual_mapping', False))
         
+        # 检查是否有启用的mod，如果有则禁用游戏路径输入框
+        self.update_game_path_input_state()
+        
         # 使用动画显示面板
         self._show_advanced_settings_panel_with_animation()
     
@@ -1013,6 +1026,64 @@ class MainWindow(QMainWindow):
         """使用动画显示高级设置面板"""
         # 使用统一的动画接口显示面板 - 覆盖主窗口
         self.show_panel_with_animation(self.advanced_settings_panel, "scale_in", 500, position_center=False)
+        # 显示面板后再次检查mod状态（因为可能在面板打开后mod状态改变了）
+        self.update_game_path_input_state()
+    
+    def update_game_path_input_state(self):
+        """更新游戏路径输入框的启用/禁用状态"""
+        try:
+            if not hasattr(self, 'path_input') or not self.path_input:
+                return
+            
+            # 检查是否有启用的mod
+            if hasattr(self, 'mod_table') and self.mod_table:
+                enabled_mods = self.mod_table.get_enabled_mods()
+                has_enabled_mods = len(enabled_mods) > 0
+            else:
+                # 如果没有mod_table，检查JSON文件
+                has_enabled_mods = self._check_enabled_mods_from_json()
+            
+            # 如果有启用的mod，禁用输入框和浏览按钮
+            self.path_input.setEnabled(not has_enabled_mods)
+            if hasattr(self, 'browse_btn') and self.browse_btn:
+                self.browse_btn.setEnabled(not has_enabled_mods)
+            
+            # 如果有启用的mod，显示提示信息
+            if has_enabled_mods:
+                self.path_input.setPlaceholderText("请先禁用所有mod后才能修改游戏路径...")
+            else:
+                self.path_input.setPlaceholderText("请选择游戏根目录...")
+        except RuntimeError as e:
+            # Qt对象可能已被删除，忽略此错误
+            if "already deleted" in str(e):
+                return
+            raise
+        except Exception:
+            # 其他异常也忽略，避免影响mod安装流程
+            pass
+    
+    def _check_enabled_mods_from_json(self):
+        """从JSON文件检查是否有启用的mod"""
+        import os
+        import json
+        project_root = self.get_project_root()
+        mod_states_file = os.path.join(project_root, "json", "mod_states.json")
+        
+        if os.path.exists(mod_states_file):
+            try:
+                with open(mod_states_file, 'r', encoding='utf-8') as f:
+                    mod_states = json.load(f)
+                    # 检查是否有启用的mod
+                    for mod_name, state in mod_states.items():
+                        if isinstance(state, dict):
+                            if state.get('enabled', False):
+                                return True
+                        elif state:  # 旧格式，直接是布尔值
+                            return True
+            except Exception:
+                pass
+        
+        return False
     
     def create_advanced_settings_panel(self):
         """创建高级设置面板 - 完全复制导入模组的create_import_panel方法"""
@@ -1123,6 +1194,11 @@ class MainWindow(QMainWindow):
                 color: #9D00FF;
                 font-size: 14px;
             }
+            QLineEdit:disabled {
+                background-color: rgba(200, 200, 200, 150);
+                color: rgba(100, 100, 100, 150);
+                border: 1px solid rgba(139, 69, 19, 100);
+            }
         """)
         
         path_label = QLabel("游戏根目录:")
@@ -1136,8 +1212,8 @@ class MainWindow(QMainWindow):
         path_layout.addWidget(self.path_input, stretch=1)
         
         # 浏览按钮
-        browse_btn = QPushButton("浏览")
-        browse_btn.setStyleSheet("""
+        self.browse_btn = QPushButton("浏览")
+        self.browse_btn.setStyleSheet("""
             QPushButton {
                 background-color: rgba(255, 255, 255, 200);
                 border: 1px solid #8B4513;
@@ -1150,9 +1226,14 @@ class MainWindow(QMainWindow):
             QPushButton:hover {
                 background-color: rgba(255, 182, 193, 200);
             }
+            QPushButton:disabled {
+                background-color: rgba(200, 200, 200, 150);
+                color: rgba(100, 100, 100, 150);
+                border: 1px solid rgba(139, 69, 19, 100);
+            }
         """)
-        browse_btn.clicked.connect(self.browse_advanced_path)
-        path_layout.addWidget(browse_btn)
+        self.browse_btn.clicked.connect(self.browse_advanced_path)
+        path_layout.addWidget(self.browse_btn)
         
         form_layout.addRow(path_layout)
         
@@ -1245,6 +1326,52 @@ class MainWindow(QMainWindow):
         virtual_mapping_layout.addStretch()
         
         form_layout.addRow(virtual_mapping_widget)
+        
+        # Junction映射设置按钮
+        junction_widget = QWidget()
+        junction_layout = QVBoxLayout()
+        junction_layout.setContentsMargins(0, 0, 0, 0)
+        junction_layout.setSpacing(10)
+        junction_widget.setLayout(junction_layout)
+        
+        junction_label = QLabel("Junction映射设置:")
+        junction_label.setStyleSheet(label_style)
+        junction_layout.addWidget(junction_label)
+        
+        junction_desc = QLabel("将游戏目录重命名为隐藏名称，并创建junction指向virtual文件夹。\n这样Steam会识别junction，而实际文件在隐藏目录中。")
+        junction_desc.setStyleSheet("""
+            QLabel {
+                color: #9D00FF;
+                font-size: 12px;
+                padding: 5px;
+            }
+        """)
+        junction_desc.setWordWrap(True)
+        junction_layout.addWidget(junction_desc)
+        
+        self.btn_setup_junction = QPushButton("设置Junction映射")
+        self.btn_setup_junction.setStyleSheet("""
+            QPushButton {
+                background-color: rgba(255, 255, 255, 200);
+                border: 1px solid #8B4513;
+                border-radius: 4px;
+                color: #9D00FF;
+                font-size: 13px;
+                font-weight: bold;
+                padding: 8px 15px;
+            }
+            QPushButton:hover {
+                background-color: rgba(255, 182, 193, 200);
+            }
+            QPushButton:disabled {
+                background-color: rgba(200, 200, 200, 150);
+                color: #666666;
+            }
+        """)
+        self.btn_setup_junction.clicked.connect(self.handle_setup_junction)
+        junction_layout.addWidget(self.btn_setup_junction)
+        
+        form_layout.addRow(junction_widget)
         
         layout.addWidget(form_widget)
         
@@ -1344,8 +1471,10 @@ class MainWindow(QMainWindow):
             old_virtual_mapping = current_settings.get('virtual_mapping', False)
             new_virtual_mapping = self.virtual_mapping_checkbox.isChecked()
             
+            # 准备新的设置（先不立即保存，视后续操作结果而定）
+            game_path = self.path_input.text()
             settings = {
-                'game_path': self.path_input.text(),
+                'game_path': game_path,
                 'sandbox_mode': self.sandbox_checkbox.isChecked(),
                 'virtual_mapping': new_virtual_mapping
             }
@@ -1379,12 +1508,78 @@ class MainWindow(QMainWindow):
                         "虚拟映射功能需要管理员权限才能创建符号链接。\n\n"
                         "为了防止难以预料的错误产生，请确保开启时所有mod已禁用，以后以符号链接方式重新启用！"
                     )
+                
+                # 执行一次性junction映射设置（重命名游戏目录 + 创建junction + 填充virtual）
+                if not game_path or not os.path.exists(game_path):
+                    QMessageBox.warning(self, "错误", "请先设置有效的游戏路径，并确保目录存在！")
+                    return
+                
+                success, message = self.setup_junction_mapping(game_path)
+                if success:
+                    QMessageBox.information(self, "成功", message)
+                else:
+                    QMessageBox.critical(self, "错误", message)
+                    # 如果设置junction失败，不保存“开启虚拟映射”状态
+                    return
+            
             elif old_virtual_mapping and not new_virtual_mapping:
-                # 从开启变为关闭：删除所有符号链接，复制文件到游戏根目录
+                # 从开启变为关闭：先撤销junction映射，再执行原有的文件转换逻辑
+                if not game_path:
+                    QMessageBox.warning(self, "错误", "游戏路径为空，无法撤销junction映射！")
+                    return
+                
+                success, message = self.teardown_junction_mapping(game_path)
+                if not success:
+                    QMessageBox.critical(self, "错误", message)
+                    # 撤销失败，为避免状态不一致，不继续关闭虚拟映射
+                    return
+                
+                # 撤销成功后，删除所有符号链接，复制文件到游戏根目录
                 self.convert_symlinks_to_files()
             
+            # 只有在所有相关操作成功后才保存设置
             self.save_advanced_settings(settings)
             self.hide_advanced_settings_panel()
+    
+    def handle_setup_junction(self):
+        """处理设置junction映射按钮点击"""
+        settings = self.load_advanced_settings()
+        game_path = settings.get('game_path', '')
+        
+        if not game_path:
+            QMessageBox.warning(self, "错误", "请先设置游戏路径！")
+            return
+        
+        if not os.path.exists(game_path):
+            QMessageBox.warning(self, "错误", f"游戏目录不存在: {game_path}")
+            return
+        
+        # 确认对话框
+        reply = QMessageBox.warning(
+            self,
+            "设置Junction映射",
+            "此操作将：\n"
+            "1. 将游戏目录重命名为使用非常规空格的名字（隐藏）\n"
+            "2. 在virtual中创建原游戏文件的符号链接\n"
+            "3. 创建junction指向virtual文件夹\n\n"
+            "此操作需要管理员权限，请确保以管理员身份运行程序。\n\n"
+            "是否继续？",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No
+        )
+        
+        if reply != QMessageBox.Yes:
+            return
+        
+        # 执行设置
+        try:
+            success, message = self.setup_junction_mapping(game_path)
+            if success:
+                QMessageBox.information(self, "成功", message)
+            else:
+                QMessageBox.warning(self, "失败", message)
+        except Exception as e:
+            QMessageBox.critical(self, "错误", f"设置junction映射时发生错误：{str(e)}")
     
     def hide_advanced_settings_panel(self):
         """隐藏高级设置面板"""
@@ -2221,12 +2416,70 @@ class MainWindow(QMainWindow):
             print(f"[失败] 保存设置失败")
     
     def create_right_search_area(self):
-        """创建右侧搜索设置区：搜索框 + 设置按钮"""
+        """创建右侧搜索设置区：筛选按钮 + 搜索框 + 设置按钮"""
         search_area_widget = QWidget()
         search_area_layout = QHBoxLayout()
         search_area_layout.setSpacing(SPACING_BASE)  # 组件之间的间距（8px）
         search_area_layout.setContentsMargins(0, 0, 0, 0)
         search_area_widget.setLayout(search_area_layout)
+        
+        # 筛选按钮和下拉框
+        filter_widget = QWidget()
+        filter_layout = QHBoxLayout()
+        filter_layout.setSpacing(5)
+        filter_layout.setContentsMargins(0, 0, 0, 0)
+        filter_widget.setLayout(filter_layout)
+        
+        # 筛选类型下拉框
+        self.filter_type_combo = QComboBox()
+        self.filter_type_combo.addItems(["无条件", "收藏", "忽略", "标签", "作者"])
+        self.filter_type_combo.setMinimumWidth(80)
+        self.filter_type_combo.setMaximumWidth(100)
+        self.filter_type_combo.setCurrentIndex(0)  # 默认选择"无条件"
+        self.filter_type_combo.setStyleSheet(f"""
+            QComboBox {{
+                background-color: white;
+                border: 1px solid {COLOR_BG_GRAY};
+                border-radius: {BORDER_RADIUS - 2}px;
+                color: {COLOR_TEXT_DARK};
+                padding: 6px 10px;
+                font-size: 13px;
+            }}
+            QComboBox:hover {{
+                border: 2px solid {COLOR_PRIMARY};
+            }}
+            QComboBox:focus {{
+                border: 2px solid {COLOR_PRIMARY};
+            }}
+        """)
+        self.filter_type_combo.currentTextChanged.connect(self.on_filter_type_changed)
+        filter_layout.addWidget(self.filter_type_combo)
+        
+        # 筛选值下拉框（二级菜单，用于标签和作者）
+        self.filter_value_combo = QComboBox()
+        self.filter_value_combo.setMinimumWidth(120)
+        self.filter_value_combo.setMaximumWidth(200)
+        self.filter_value_combo.setStyleSheet(f"""
+            QComboBox {{
+                background-color: white;
+                border: 1px solid {COLOR_BG_GRAY};
+                border-radius: {BORDER_RADIUS - 2}px;
+                color: {COLOR_TEXT_DARK};
+                padding: 6px 10px;
+                font-size: 13px;
+            }}
+            QComboBox:hover {{
+                border: 2px solid {COLOR_PRIMARY};
+            }}
+            QComboBox:focus {{
+                border: 2px solid {COLOR_PRIMARY};
+            }}
+        """)
+        self.filter_value_combo.currentTextChanged.connect(self.on_filter_value_changed)
+        self.filter_value_combo.hide()  # 初始隐藏
+        filter_layout.addWidget(self.filter_value_combo)
+        
+        search_area_layout.addWidget(filter_widget)
         
         # 搜索输入框
         self.search_input = QLineEdit()
@@ -2281,7 +2534,56 @@ class MainWindow(QMainWindow):
         self.btn_refresh.clicked.connect(self.refresh_mod_list)
         search_area_layout.addWidget(self.btn_refresh)
         
+        # 初始化筛选状态
+        self.current_filter_type = "无条件"
+        self.current_filter_value = None
+        
         return search_area_widget
+    
+    def on_filter_type_changed(self, filter_type):
+        """筛选类型改变时的处理"""
+        self.current_filter_type = filter_type
+        
+        # 清空筛选值
+        self.current_filter_value = None
+        self.filter_value_combo.clear()
+        
+        if filter_type == "无条件":
+            # 无条件，隐藏二级菜单，清除所有筛选
+            self.filter_value_combo.hide()
+            # 立即应用筛选（清除筛选）
+            self.apply_filter()
+        elif filter_type == "标签":
+            # 显示标签下拉框
+            self.filter_value_combo.show()
+            # 加载所有标签
+            categories = self.load_categories()
+            self.filter_value_combo.addItems(categories)
+            self.filter_value_combo.setPlaceholderText("选择标签...")
+        elif filter_type == "作者":
+            # 显示作者下拉框
+            self.filter_value_combo.show()
+            # 加载所有作者
+            authors = self.load_authors()
+            self.filter_value_combo.addItems(authors)
+            self.filter_value_combo.setPlaceholderText("选择作者...")
+        else:
+            # 收藏或忽略，不需要二级菜单
+            self.filter_value_combo.hide()
+            # 立即应用筛选
+            self.apply_filter()
+    
+    def on_filter_value_changed(self, filter_value):
+        """筛选值改变时的处理"""
+        self.current_filter_value = filter_value
+        # 应用筛选
+        self.apply_filter()
+    
+    def apply_filter(self):
+        """应用筛选条件"""
+        # 重新应用筛选和搜索
+        search_text = self.search_input.text().strip() if hasattr(self, 'search_input') else ""
+        self.filter_mods_by_search(search_text)
     
     def create_content_area(self):
         """创建中间内容区域：左侧Mod表格 + 右侧操作按钮栏"""
@@ -3006,37 +3308,47 @@ class MainWindow(QMainWindow):
             if file_path:
                 self.load_custom_thumbnail(file_path)
     
+    def crop_thumbnail_to_square(self, pixmap):
+        """裁剪图片为正方形"""
+        if pixmap.isNull():
+            return pixmap
+        
+        height = pixmap.height()
+        width = pixmap.width()
+        
+        # 以最短边为边长
+        size = min(width, height)
+        
+        # 从长边的中心裁剪
+        if width > height:
+            # 宽度大于高度，从宽度中心裁剪
+            x = (width - size) // 2
+            y = 0
+        else:
+            # 高度大于等于宽度，从高度中心裁剪
+            x = 0
+            y = (height - size) // 2
+        
+        # 截取正方形区域
+        cropped_pixmap = pixmap.copy(x, y, size, size)
+        return cropped_pixmap
+    
     def load_custom_thumbnail(self, file_path):
         """加载自定义缩略图"""
         try:
             from PySide6.QtGui import QPixmap
             pixmap = QPixmap(file_path)
             if not pixmap.isNull():
-                # 以图片高度为基准，在中心截取正方形
-                height = pixmap.height()
-                width = pixmap.width()
+                # 裁剪为正方形（以最短边为边长，从长边中心裁剪）
+                cropped_pixmap = self.crop_thumbnail_to_square(pixmap)
                 
-                if width > height:
-                    # 宽度大于高度，从中心截取正方形
-                    x = (width - height) // 2
-                    y = 0
-                    size = height
-                else:
-                    # 高度大于等于宽度，从中心截取正方形
-                    x = 0
-                    y = (height - width) // 2
-                    size = width
-                
-                # 截取正方形区域
-                cropped_pixmap = pixmap.copy(x, y, size, size)
-                
-                # 缩放到288x288
+                # 缩放到288x288（用于显示）
                 scaled_pixmap = cropped_pixmap.scaled(288, 288, Qt.KeepAspectRatio, Qt.SmoothTransformation)
                 
                 # 显示缩略图
                 self.thumbnail_preview.setPixmap(scaled_pixmap)
-                # 保存pixmap供保存时使用
-                self.thumbnail_pixmap = scaled_pixmap
+                # 保存原始裁剪后的pixmap供保存时使用（不缩放，保持原始尺寸）
+                self.thumbnail_pixmap = cropped_pixmap
                 
         except Exception as e:
             print(f"加载缩略图失败: {e}")
@@ -3259,10 +3571,11 @@ class MainWindow(QMainWindow):
             tree = ET.ElementTree(xml_root)
             tree.write(xml_file_path, encoding='utf-8', xml_declaration=True)
             
-            # 生成PNG文件（如果有缩略图）
+            # 保存PNG文件（如果有缩略图）
             if hasattr(self, 'thumbnail_pixmap') and not self.thumbnail_pixmap.isNull():
                 png_file_path = os.path.join(modinfo_dir, "thumbnail.png")
-                self.thumbnail_pixmap.save(png_file_path)
+                # 保存裁剪后的正方形图片（保持原始裁剪尺寸，不缩放）
+                self.thumbnail_pixmap.save(png_file_path, "PNG")
             
             # 添加到主表格（不再检查未知项，因为已经在上面检查过了）
             self.add_mod_to_table(mod_name, category, author, check_unknown=False)
@@ -3320,13 +3633,7 @@ class MainWindow(QMainWindow):
         return result
     
     def add_mod_to_table(self, mod_name, category, author, check_unknown=True):
-        """添加模组到主表格
-        Args:
-            mod_name: mod名称
-            category: 分类
-            author: 作者
-            check_unknown: 是否检查未知的标签和作者（默认True，加载已有mod时设为False）
-        """
+        """添加模组到主表格"""
         # 检查并处理未知的标签和作者（仅在导入新mod时检查）
         if check_unknown:
             category, author = self.check_and_handle_unknown_category_author(category, author)
@@ -3421,11 +3728,20 @@ class MainWindow(QMainWindow):
         
         row = selected_rows[0].row()
         
+        # 获取旧名称（在更新表格之前）
+        old_mod_name = self.mod_table.item(row, 1).text()
+        
         # 获取表单数据
         mod_name = self.mod_name_input.text().strip() or "未命名模组"
         category = self.category_input.text().strip()  # 从输入框获取，支持多分类（分号分隔）
         author = self.author_combo.currentText().strip() or "未知"
         description = self.description_input.text().strip()
+        
+        # 如果mod名称改变了，更新文件栈中的mod名称
+        if old_mod_name != mod_name:
+            self.update_file_stack_mod_name(old_mod_name, mod_name)
+            # 更新虚拟映射优先级中的mod名称
+            self.update_mod_priority_name(old_mod_name, mod_name)
         
         # 更新表格
         self.mod_table.item(row, 1).setText(mod_name)
@@ -3438,6 +3754,22 @@ class MainWindow(QMainWindow):
         
         # 更新XML文件（如果存在）- 保存多分类（分号分隔）到XML
         self.update_mod_xml(mod_name, category, author, description)
+        
+        # 保存缩略图（如果有）
+        project_root = self.get_project_root()
+        mods_dir = os.path.join(project_root, "mods")
+        mod_folder_name = mod_name.replace(" ", "_").replace("/", "_").replace("\\", "_")
+        mod_folder_path = os.path.join(mods_dir, mod_folder_name)
+        
+        if os.path.exists(mod_folder_path):
+            modinfo_dir = os.path.join(mod_folder_path, "modinfo")
+            os.makedirs(modinfo_dir, exist_ok=True)
+            
+            # 保存PNG文件（如果有缩略图）
+            if hasattr(self, 'thumbnail_pixmap') and not self.thumbnail_pixmap.isNull():
+                png_file_path = os.path.join(modinfo_dir, "thumbnail.png")
+                # 保存裁剪后的正方形图片（保持原始裁剪尺寸，不缩放）
+                self.thumbnail_pixmap.save(png_file_path, "PNG")
         
         # 关闭导入面板
         self.hide_import_panel()
@@ -3567,6 +3899,21 @@ class MainWindow(QMainWindow):
                     
                 except Exception as e:
                     pass  # 读取XML文件失败，不打印详细信息
+                
+                # 加载现有缩略图（如果存在）
+                thumbnail_path = os.path.join(modinfo_dir, "thumbnail.png")
+                if os.path.exists(thumbnail_path):
+                    try:
+                        from PySide6.QtGui import QPixmap
+                        pixmap = QPixmap(thumbnail_path)
+                        if not pixmap.isNull():
+                            # 缩放到288x288用于显示
+                            scaled_pixmap = pixmap.scaled(288, 288, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                            self.thumbnail_preview.setPixmap(scaled_pixmap)
+                            # 保存原始pixmap供保存时使用
+                            self.thumbnail_pixmap = pixmap
+                    except Exception as e:
+                        pass  # 加载缩略图失败，不打印详细信息
     
     def get_xml_text(self, root, tag):
         """安全获取XML元素文本"""
@@ -4086,6 +4433,8 @@ class MainWindow(QMainWindow):
         
         # 连接统计变化信号到更新方法
         self.mod_table.statistics_changed.connect(self.update_statistics)
+        # 当mod状态改变时，更新游戏路径输入框的启用/禁用状态
+        self.mod_table.statistics_changed.connect(self.update_game_path_input_state)
         
         return self.mod_table
     
@@ -4577,9 +4926,14 @@ class MainWindow(QMainWindow):
                     self.mod_table.showRow(row)
     
     def filter_mods_by_search(self, search_text):
-        """根据搜索文本过滤mod列表，适配忽略规则"""
+        """根据搜索文本和筛选条件过滤mod列表，适配忽略规则"""
         search_text = search_text.strip().lower()
         is_searching = bool(search_text)  # 是否正在搜索
+        
+        # 获取当前筛选条件
+        filter_type = getattr(self, 'current_filter_type', "无条件")
+        filter_value = getattr(self, 'current_filter_value', None)
+        has_filter = filter_type and filter_type != "无条件" and (filter_type in ["收藏", "忽略"] or (filter_type in ["标签", "作者"] and filter_value))
         
         # 遍历所有行
         for row in range(self.mod_table.rowCount()):
@@ -4592,16 +4946,45 @@ class MainWindow(QMainWindow):
             
             # 检查mod是否被忽略
             is_ignored = self.is_mod_ignored(mod_name)
+            is_favorite = self.is_mod_favorite(mod_name)
             
-            # 如果搜索为空，应用忽略规则（隐藏被忽略的mod）
+            # 应用筛选条件
+            should_show = True
+            
+            if has_filter:
+                if filter_type == "收藏":
+                    should_show = is_favorite
+                elif filter_type == "忽略":
+                    should_show = is_ignored
+                elif filter_type == "标签" and filter_value:
+                    category_item = self.mod_table.item(row, 2)
+                    if category_item:
+                        categories = [cat.strip() for cat in category_item.text().split(';') if cat.strip()]
+                        should_show = filter_value in categories
+                    else:
+                        should_show = False
+                elif filter_type == "作者" and filter_value:
+                    author_item = self.mod_table.item(row, 3)
+                    if author_item:
+                        should_show = author_item.text() == filter_value
+                    else:
+                        should_show = False
+            
+            # 如果筛选条件不匹配，隐藏该行
+            if has_filter and not should_show:
+                self.mod_table.setRowHidden(row, True)
+                continue
+            
+            # 应用搜索条件
             if not search_text:
-                if is_ignored:
+                # 如果搜索为空，应用忽略规则（隐藏被忽略的mod）
+                if not has_filter and is_ignored:
                     self.mod_table.setRowHidden(row, True)
                 else:
                     self.mod_table.setRowHidden(row, False)
                 continue
             
-            # 如果正在搜索，显示所有匹配的mod（包括被忽略的）
+            # 如果正在搜索，检查是否匹配
             category_item = self.mod_table.item(row, 2)
             author_item = self.mod_table.item(row, 3)
             
@@ -4617,11 +5000,7 @@ class MainWindow(QMainWindow):
                 self.mod_table.setRowHidden(row, True)
     
     def apply_mod_to_game(self, mod_name, enabled):
-        """应用或移除单个mod到游戏根目录（启用时复制，禁用时删除）
-        
-        Returns:
-            bool: 如果enabled=True，返回是否成功；如果enabled=False，返回True
-        """
+        """应用或移除单个mod到游戏根目录"""
         # 获取游戏根目录
         settings = self.load_advanced_settings()
         game_path = settings.get('game_path', '')
@@ -4636,8 +5015,8 @@ class MainWindow(QMainWindow):
         project_root = self.get_project_root()
         mods_dir = os.path.join(project_root, "mods")
         
-        # 获取mod文件夹路径（mod名称转换为文件夹名）
-        mod_folder_name = mod_name.replace(" ", "_").replace("/", "_").replace("\\", "_")
+        # 获取mod文件夹路径（使用统一的命名规则）
+        mod_folder_name = self.mod_name_to_folder_name(mod_name)
         mod_folder_path = os.path.join(mods_dir, mod_folder_name)
         
         if not os.path.exists(mod_folder_path):
@@ -4664,144 +5043,146 @@ class MainWindow(QMainWindow):
                         self.uninstall_mod_permanently(mod_name, row)
                     return False
             
-            # 启用前检查文件冲突
-            conflict_result = self.check_and_resolve_conflicts(mod_name, mod_folder_path)
-            if conflict_result == 'cancel':
-                # 取消启用
-                return False
-            elif conflict_result == 'override':
-                # 直接覆盖，继续执行
-                pass
-            elif conflict_result == 'manual':
-                # 手动修改优先级，已经在check_and_resolve_conflicts中处理
-                pass
+            # 启用前检查文件冲突（显示冲突信息）
+            # 当前实现始终返回 'override'，实际冲突处理通过虚拟映射优先级面板完成
+            self.check_and_resolve_conflicts(mod_name, mod_folder_path)
             
-            # 启用：复制文件到游戏目录或创建符号链接
+            # 启用：根据是否使用虚拟映射选择逻辑
             use_virtual_mapping = settings.get('virtual_mapping', False)
             
-            copied_count = 0
-            symlink_count = 0
-            failed_count = 0
-            has_permission_error = False
-            
-            for root, dirs, files in os.walk(mod_folder_path):
-                # 计算相对路径
-                rel_path = os.path.relpath(root, mod_folder_path)
+            if use_virtual_mapping:
+                # 虚拟映射模式：使用原有逻辑（符号链接）
+                # 确保virtual文件夹存在
+                if not self.ensure_virtual_folder(game_path):
+                    print(f"[失败] 无法创建virtual文件夹")
+                    return False
                 
-                # 跳过modinfo文件夹及其子目录
-                if rel_path.startswith('modinfo') or os.path.basename(root) == 'modinfo':
-                    if 'modinfo' in dirs:
-                        dirs.remove('modinfo')
-                    continue
+                virtual_folder = self.get_virtual_folder_path(game_path)
+                created_count = 0  # 新创建的符号链接
+                updated_count = 0  # 更新的符号链接（替换已存在的）
+                failed_count = 0
+                has_permission_error = False
                 
-                if rel_path == '.':
-                    target_dir = game_path
-                else:
-                    target_dir = os.path.join(game_path, rel_path)
-                
-                # 确保目标目录存在
-                os.makedirs(target_dir, exist_ok=True)
-                
-                # 复制文件或创建符号链接
-                for file in files:
-                    source_file = os.path.join(root, file)
-                    target_file = os.path.join(target_dir, file)
+                for root, dirs, files in os.walk(mod_folder_path):
+                    # 计算相对路径
+                    rel_path = os.path.relpath(root, mod_folder_path)
                     
-                    try:
-                        if use_virtual_mapping:
-                            # 使用符号链接（虚拟映射）- 不复制文件，只创建符号链接
-                            # 确保使用绝对路径（Windows符号链接需要绝对路径）
+                    # 跳过modinfo文件夹及其子目录
+                    if rel_path.startswith('modinfo') or os.path.basename(root) == 'modinfo':
+                        if 'modinfo' in dirs:
+                            dirs.remove('modinfo')
+                        continue
+                    
+                    if rel_path == '.':
+                        target_dir_in_virtual = virtual_folder
+                    else:
+                        target_dir_in_virtual = os.path.join(virtual_folder, rel_path)
+                    
+                    # 确保目标目录存在（只在virtual文件夹内）
+                    os.makedirs(target_dir_in_virtual, exist_ok=True)
+                    
+                    # 在virtual文件夹内创建符号链接，指向mod文件
+                    for file in files:
+                        source_file = os.path.join(root, file)
+                        target_file_in_virtual = os.path.join(target_dir_in_virtual, file)
+                        
+                        try:
                             source_file_abs = os.path.abspath(source_file)
                             
-                            if os.path.exists(target_file):
-                                # 如果已存在，先删除（可能是文件或链接）
-                                if os.path.islink(target_file) or os.path.isfile(target_file):
-                                    os.remove(target_file)
+                            # 检查文件是否已存在
+                            file_existed = os.path.exists(target_file_in_virtual)
                             
-                            # 创建符号链接
-                            os.symlink(source_file_abs, target_file)
-                            symlink_count += 1
-                            # 验证符号链接是否创建成功（不打印，只在失败时打印）
-                            if not os.path.islink(target_file):
-                                print(f"[警告] 符号链接可能未生效: {file}")
-                        else:
-                            # 使用物理复制
-                            shutil.copy2(source_file, target_file)
-                            copied_count += 1
-                    except OSError as e:
-                        # Windows上可能需要管理员权限或开发者模式
-                        if hasattr(e, 'winerror') and e.winerror == 1314:
-                            has_permission_error = True
-                            # 需要管理员权限，显示权限提示面板
-                            if not hasattr(self, '_admin_permission_shown') or not self._admin_permission_shown:
-                                self._admin_permission_shown = True
-                                self.show_admin_permission_panel()
-                            print(f"[失败] 创建符号链接失败: {file} (需要管理员权限或启用开发者模式)")
-                        else:
+                            # 在virtual文件夹内创建符号链接，指向mod文件
+                            if file_existed:
+                                if os.path.islink(target_file_in_virtual) or os.path.isfile(target_file_in_virtual):
+                                    os.remove(target_file_in_virtual)
+                            
+                            os.symlink(source_file_abs, target_file_in_virtual)
+                            
+                            # 统计创建或更新
+                            if file_existed:
+                                updated_count += 1
+                            else:
+                                created_count += 1
+                            
+                            if not os.path.islink(target_file_in_virtual):
+                                print(f"[警告] virtual文件夹内符号链接可能未生效: {file}")
+                        except OSError as e:
+                            if hasattr(e, 'winerror') and e.winerror == 1314:
+                                has_permission_error = True
+                                if not hasattr(self, '_admin_permission_shown') or not self._admin_permission_shown:
+                                    self._admin_permission_shown = True
+                                    self.show_admin_permission_panel()
+                                print(f"[失败] 创建符号链接失败: {file} (需要管理员权限或启用开发者模式)")
+                            else:
+                                print(f"[失败] 文件操作失败: {file} ({str(e)})")
+                            failed_count += 1
+                        except Exception as e:
                             print(f"[失败] 文件操作失败: {file} ({str(e)})")
-                        failed_count += 1
-                    except Exception as e:
-                        print(f"[失败] 文件操作失败: {file} ({str(e)})")
-                        failed_count += 1
-            
-            # 打印总结信息
-            if use_virtual_mapping:
-                if symlink_count > 0 and failed_count == 0:
-                    print(f"[成功] mod应用成功: {mod_name} (虚拟映射: 成功创建 {symlink_count} 个符号链接)")
+                            failed_count += 1
+                
+                # 生成日志信息
+                total_count = created_count + updated_count
+                if total_count > 0 and failed_count == 0:
+                    parts = []
+                    if created_count > 0:
+                        parts.append(f"创建 {created_count} 个")
+                    if updated_count > 0:
+                        parts.append(f"更新 {updated_count} 个")
+                    action_desc = "、".join(parts) + "符号链接"
+                    print(f"[成功] mod应用成功: {mod_name} (虚拟映射: {action_desc})")
+                    # 同步virtual文件夹内容到游戏根目录
+                    self.sync_virtual_to_game_root(game_path)
                     return True
-                elif symlink_count > 0 and failed_count > 0:
-                    print(f"[警告] mod应用部分成功: {mod_name} (成功: {symlink_count} 个符号链接, 失败: {failed_count} 个)")
-                    # 如果有权限错误，返回False以回滚复选框
+                elif total_count > 0 and failed_count > 0:
+                    parts = []
+                    if created_count > 0:
+                        parts.append(f"创建 {created_count} 个")
+                    if updated_count > 0:
+                        parts.append(f"更新 {updated_count} 个")
+                    action_desc = "、".join(parts) + "符号链接"
+                    print(f"[警告] mod应用部分成功: {mod_name} (虚拟映射: {action_desc}, 失败: {failed_count} 个)")
+                    # 即使部分成功，也尝试同步
+                    self.sync_virtual_to_game_root(game_path)
                     return not has_permission_error
                 else:
-                    # 全部失败，返回False以回滚复选框
-                    print(f"[失败] mod应用失败: {mod_name} (未能创建任何符号链接)")
-                    return False
-            else:
-                if copied_count > 0 and failed_count == 0:
-                    print(f"[成功] mod应用成功: {mod_name} (物理复制: {copied_count} 个文件)")
+                    # 没有创建或更新任何符号链接，但也没有失败
+                    # 这种情况可能是：virtual中已经存在同样的链接，或者文件全部由优先级刷新逻辑管理
+                    print(f"[提示] mod应用: {mod_name} (虚拟映射: 无需创建新的符号链接)")
+                    # 仍然同步一次，保证游戏目录与virtual一致
+                    self.sync_virtual_to_game_root(game_path)
                     return True
-                elif copied_count > 0 and failed_count > 0:
-                    print(f"[警告] mod应用部分成功: {mod_name} (成功: {copied_count} 个文件, 失败: {failed_count} 个)")
-                    return False
-                else:
-                    # 全部失败，返回False以回滚复选框
-                    print(f"[失败] mod应用失败: {mod_name} (未能复制任何文件)")
-                    return False
+            else:
+                # 非虚拟映射模式：使用文件栈逻辑
+                success = self.update_file_stack_for_mod(mod_name, mod_folder_path, True)
+                return success
         else:
-            # 禁用：删除游戏目录中该mod的文件或符号链接
+            # 禁用：使用文件栈逻辑或虚拟映射逻辑
             use_virtual_mapping = settings.get('virtual_mapping', False)
-            deleted_count = 0
-            deleted_symlink_count = 0
-            updated_symlink_count = 0
-            failed_count = 0
             
-            # 如果是虚拟映射，检查是否有其他启用的冲突mod
-            next_priority_mod = None
             if use_virtual_mapping:
+                # 虚拟映射模式：保持原有逻辑（符号链接）
+                deleted_count = 0
+                deleted_symlink_count = 0
+                updated_symlink_count = 0
+                failed_count = 0
+                
+                # 检查是否有其他启用的冲突mod
+                next_priority_mod = None
                 # 获取该mod的所有冲突mod
                 conflict_check = self.check_single_mod_conflicts(mod_name, mod_folder_path)
                 if conflict_check['has_conflict']:
                     conflicting_mods = conflict_check['conflicting_mods']
-                    
-                    # 获取当前启用的mod
                     enabled_mods = self.mod_table.get_enabled_mods()
-                    
-                    # 找出仍然启用的冲突mod
                     enabled_conflicting_mods = [m for m in conflicting_mods if m in enabled_mods]
                     
                     if enabled_conflicting_mods:
-                        # 有启用的冲突mod，需要找到下一个优先级的mod
-                        # 获取优先级顺序
                         all_conflicting_mods = [mod_name] + conflicting_mods
                         priority_order = self.load_mod_priority(mod_name, conflicting_mods)
                         
                         if priority_order:
-                            # 使用已保存的优先级顺序
-                            # 找到当前mod在优先级中的位置
                             try:
                                 current_index = priority_order.index(mod_name)
-                                # 找到下一个优先级的mod（在当前mod之后，且仍然启用）
                                 for i in range(current_index + 1, len(priority_order)):
                                     next_mod = priority_order[i]
                                     if next_mod in enabled_conflicting_mods:
@@ -4810,141 +5191,237 @@ class MainWindow(QMainWindow):
                             except ValueError:
                                 pass
                         else:
-                            # 没有保存的优先级，使用默认顺序（按列表顺序）
                             for mod in conflicting_mods:
                                 if mod in enabled_conflicting_mods:
                                     next_priority_mod = mod
                                     break
-            
-            # 遍历该mod的所有文件
-            mod_files = {}  # 存储文件路径映射 {相对路径: 目标文件路径}
-            for root, dirs, files in os.walk(mod_folder_path):
-                # 计算相对路径
-                rel_path = os.path.relpath(root, mod_folder_path)
                 
-                # 跳过modinfo文件夹及其子目录
-                if rel_path.startswith('modinfo') or os.path.basename(root) == 'modinfo':
-                    if 'modinfo' in dirs:
-                        dirs.remove('modinfo')
-                    continue
+                # 确保virtual文件夹存在
+                if not self.ensure_virtual_folder(game_path):
+                    print(f"[失败] 无法创建virtual文件夹")
+                    return True  # 继续执行，但可能无法删除符号链接
                 
-                if rel_path == '.':
-                    target_dir = game_path
-                else:
-                    target_dir = os.path.join(game_path, rel_path)
+                virtual_folder = self.get_virtual_folder_path(game_path)
                 
-                # 收集文件信息
-                for file in files:
-                    target_file = os.path.join(target_dir, file)
+                # 遍历该mod的所有文件
+                mod_files = {}
+                for root, dirs, files in os.walk(mod_folder_path):
+                    rel_path = os.path.relpath(root, mod_folder_path)
+                    if rel_path.startswith('modinfo') or os.path.basename(root) == 'modinfo':
+                        if 'modinfo' in dirs:
+                            dirs.remove('modinfo')
+                        continue
                     if rel_path == '.':
-                        file_rel_path = file
+                        target_dir = virtual_folder
                     else:
-                        file_rel_path = os.path.join(rel_path, file).replace('\\', '/')
-                    mod_files[file_rel_path] = target_file
+                        target_dir = os.path.join(virtual_folder, rel_path)
+                    for file in files:
+                        target_file_in_virtual = os.path.join(target_dir, file)
+                        if rel_path == '.':
+                            file_rel_path = file
+                        else:
+                            file_rel_path = os.path.join(rel_path, file).replace('\\', '/')
+                        # 只记录virtual文件夹内的路径
+                        mod_files[file_rel_path] = target_file_in_virtual
             
-            # 处理每个文件
-            for file_rel_path, target_file in mod_files.items():
-                if not os.path.exists(target_file):
-                    continue
-                
-                try:
-                    is_symlink = os.path.islink(target_file)
+                # 处理每个文件（只在virtual文件夹内操作）
+                for file_rel_path, target_file_in_virtual in mod_files.items():
+                    # 检查virtual文件夹内的文件是否存在
+                    if not os.path.exists(target_file_in_virtual):
+                        continue
                     
-                    if use_virtual_mapping and next_priority_mod:
-                        # 虚拟映射且有下一个优先级的mod，更新符号链接
-                        # 获取下一个mod的文件路径
-                        project_root = self.get_project_root()
-                        mods_dir = os.path.join(project_root, "mods")
-                        next_mod_folder_name = next_priority_mod.replace(" ", "_").replace("/", "_").replace("\\", "_")
-                        next_mod_folder_path = os.path.join(mods_dir, next_mod_folder_name)
-                        
-                        # 构建下一个mod的源文件路径
-                        if file_rel_path == os.path.basename(file_rel_path):
-                            # 根目录文件
-                            next_source_file = os.path.join(next_mod_folder_path, file_rel_path)
-                        else:
-                            # 子目录文件
-                            next_source_file = os.path.join(next_mod_folder_path, file_rel_path)
-                        
-                        if os.path.exists(next_source_file):
-                            # 删除旧的符号链接
-                            if is_symlink or os.path.isfile(target_file):
-                                os.remove(target_file)
-                            
-                            # 创建新的符号链接指向下一个优先级的mod
-                            next_source_file_abs = os.path.abspath(next_source_file)
-                            os.symlink(next_source_file_abs, target_file)
-                            updated_symlink_count += 1
-                        else:
-                            # 下一个mod没有这个文件，删除符号链接
-                            if is_symlink or os.path.isfile(target_file):
-                                os.remove(target_file)
-                            deleted_count += 1
-                            if is_symlink:
-                                deleted_symlink_count += 1
-                    else:
-                        # 没有下一个优先级的mod，删除文件或符号链接
-                        if is_symlink or os.path.isfile(target_file):
-                            os.remove(target_file)
-                            deleted_count += 1
-                            if is_symlink:
-                                deleted_symlink_count += 1
-                except Exception as e:
-                    print(f"[失败] 操作失败: {file_rel_path} ({str(e)})")
-                    failed_count += 1
-            
-            # 删除空目录（从最深开始）
-            for root, dirs, files in os.walk(mod_folder_path, topdown=False):
-                rel_path = os.path.relpath(root, mod_folder_path)
-                
-                if rel_path.startswith('modinfo') or os.path.basename(root) == 'modinfo':
-                    continue
-                
-                if rel_path == '.':
-                    continue
-                
-                target_dir = os.path.join(game_path, rel_path)
-                if os.path.exists(target_dir):
                     try:
-                        # 如果目录为空，删除它
-                        if not os.listdir(target_dir):
-                            os.rmdir(target_dir)
+                        is_symlink_virtual = os.path.islink(target_file_in_virtual)
+                        
+                        # 检查当前符号链接实际指向哪里
+                        current_target_mod = None
+                        is_game_file = False
+                        if is_symlink_virtual:
+                            try:
+                                current_target = os.readlink(target_file_in_virtual)
+                                current_target_abs = os.path.abspath(current_target)
+                                current_target_norm = self.normalize_file_path(current_target_abs).lower()
+                                current_mod_folder_norm = self.normalize_file_path(os.path.abspath(mod_folder_path)).lower()
+                                
+                                # 检查是否指向当前mod
+                                if current_target_norm.startswith(current_mod_folder_norm):
+                                    current_target_mod = mod_name
+                                else:
+                                    # 检查是否指向原游戏文件（隐藏目录）
+                                    settings = self.load_advanced_settings()
+                                    game_path_setting = settings.get('game_path', '')
+                                    if game_path_setting:
+                                        parent_dir = os.path.dirname(game_path_setting)
+                                        game_dir_name = os.path.basename(game_path_setting)
+                                        hidden_dir_name = game_dir_name.replace(' ', '\u00A0')
+                                        hidden_game_path = os.path.join(parent_dir, hidden_dir_name)
+                                        hidden_game_path_norm = self.normalize_file_path(os.path.abspath(hidden_game_path)).lower()
+                                        
+                                        if current_target_norm.startswith(hidden_game_path_norm):
+                                            is_game_file = True
+                                        else:
+                                            # 检查是否指向其他mod
+                                            project_root = self.get_project_root()
+                                            mods_dir = os.path.join(project_root, "mods")
+                                            enabled_mods = self.mod_table.get_enabled_mods()
+                                            for other_mod_name in enabled_mods:
+                                                if other_mod_name == mod_name:
+                                                    continue
+                                                other_mod_folder_name = self.mod_name_to_folder_name(other_mod_name)
+                                                other_mod_folder_path = os.path.join(mods_dir, other_mod_folder_name)
+                                                other_mod_folder_norm = self.normalize_file_path(os.path.abspath(other_mod_folder_path)).lower()
+                                                if current_target_norm.startswith(other_mod_folder_norm):
+                                                    current_target_mod = other_mod_name
+                                                    break
+                            except OSError:
+                                # 读取链接失败，无法判断
+                                pass
+                        
+                        # 如果符号链接指向的不是当前mod，且不是原游戏文件，说明已被其他mod接管，跳过
+                        if current_target_mod != mod_name and not is_game_file and current_target_mod is not None:
+                            # 说明当前文件在virtual中已经被更高优先级的mod接管，禁用低优先级mod不应影响它
+                            continue
+                        
+                        # 如果符号链接指向原游戏文件，且没有其他启用的冲突mod，应该保留（因为那是原版）
+                        if is_game_file and not next_priority_mod:
+                            continue
+                        
+                        # 如果符号链接指向当前mod，或者没有其他mod接管，需要处理
+                        if next_priority_mod:
+                            # 将符号链接切换到下一个优先级更高的已启用mod
+                            project_root = self.get_project_root()
+                            mods_dir = os.path.join(project_root, "mods")
+                            next_mod_folder_name = self.mod_name_to_folder_name(next_priority_mod)
+                            next_mod_folder_path = os.path.join(mods_dir, next_mod_folder_name)
+                            next_source_file = os.path.join(next_mod_folder_path, file_rel_path)
+                            
+                            if os.path.exists(next_source_file):
+                                # 更新virtual文件夹内的符号链接
+                                if is_symlink_virtual or os.path.isfile(target_file_in_virtual):
+                                    os.remove(target_file_in_virtual)
+                                next_source_file_abs = os.path.abspath(next_source_file)
+                                os.symlink(next_source_file_abs, target_file_in_virtual)
+                                updated_symlink_count += 1
+                            else:
+                                # 下一个优先级mod没有这个文件，检查是否有原游戏文件
+                                settings = self.load_advanced_settings()
+                                game_path_setting = settings.get('game_path', '')
+                                if game_path_setting:
+                                    parent_dir = os.path.dirname(game_path_setting)
+                                    game_dir_name = os.path.basename(game_path_setting)
+                                    hidden_dir_name = game_dir_name.replace(' ', '\u00A0')
+                                    hidden_game_path = os.path.join(parent_dir, hidden_dir_name)
+                                    game_source_file = os.path.join(hidden_game_path, file_rel_path)
+                                    
+                                    if os.path.exists(game_source_file):
+                                        # 切换到原游戏文件
+                                        if is_symlink_virtual or os.path.isfile(target_file_in_virtual):
+                                            os.remove(target_file_in_virtual)
+                                        game_source_file_abs = os.path.abspath(game_source_file)
+                                        os.symlink(game_source_file_abs, target_file_in_virtual)
+                                        updated_symlink_count += 1
+                                    else:
+                                        # 没有原游戏文件，删除符号链接
+                                        if is_symlink_virtual or os.path.isfile(target_file_in_virtual):
+                                            os.remove(target_file_in_virtual)
+                                        deleted_count += 1
+                                        if is_symlink_virtual:
+                                            deleted_symlink_count += 1
+                                else:
+                                    # 没有游戏路径设置，直接删除
+                                    if is_symlink_virtual or os.path.isfile(target_file_in_virtual):
+                                        os.remove(target_file_in_virtual)
+                                    deleted_count += 1
+                                    if is_symlink_virtual:
+                                        deleted_symlink_count += 1
+                        else:
+                            # 没有其他优先级更高的启用mod，检查是否有原游戏文件
+                            settings = self.load_advanced_settings()
+                            game_path_setting = settings.get('game_path', '')
+                            if game_path_setting:
+                                parent_dir = os.path.dirname(game_path_setting)
+                                game_dir_name = os.path.basename(game_path_setting)
+                                hidden_dir_name = game_dir_name.replace(' ', '\u00A0')
+                                hidden_game_path = os.path.join(parent_dir, hidden_dir_name)
+                                game_source_file = os.path.join(hidden_game_path, file_rel_path)
+                                
+                                if os.path.exists(game_source_file):
+                                    # 切换到原游戏文件
+                                    if is_symlink_virtual or os.path.isfile(target_file_in_virtual):
+                                        os.remove(target_file_in_virtual)
+                                    game_source_file_abs = os.path.abspath(game_source_file)
+                                    os.symlink(game_source_file_abs, target_file_in_virtual)
+                                    updated_symlink_count += 1
+                                else:
+                                    # 没有原游戏文件，删除当前mod的符号链接
+                                    if is_symlink_virtual or os.path.isfile(target_file_in_virtual):
+                                        os.remove(target_file_in_virtual)
+                                    deleted_count += 1
+                                    if is_symlink_virtual:
+                                        deleted_symlink_count += 1
+                            else:
+                                # 没有游戏路径设置，直接删除
+                                if is_symlink_virtual or os.path.isfile(target_file_in_virtual):
+                                    os.remove(target_file_in_virtual)
+                                deleted_count += 1
+                                if is_symlink_virtual:
+                                    deleted_symlink_count += 1
                     except Exception as e:
-                        pass  # 删除目录失败，不打印详细信息
-            
-            # 打印禁用成功信息
-            if use_virtual_mapping:
-                if updated_symlink_count > 0:
-                    # 有更新符号链接
-                    if failed_count == 0:
-                        print(f"[成功] mod禁用成功: {mod_name} (虚拟映射: 更新 {updated_symlink_count} 个符号链接 -> {next_priority_mod})")
+                        print(f"[失败] 操作失败: {file_rel_path} ({str(e)})")
+                        failed_count += 1
+                
+                # 删除空目录
+                for root, dirs, files in os.walk(mod_folder_path, topdown=False):
+                    rel_path = os.path.relpath(root, mod_folder_path)
+                    if rel_path.startswith('modinfo') or os.path.basename(root) == 'modinfo':
+                        continue
+                    if rel_path == '.':
+                        continue
+                    target_dir = os.path.join(virtual_folder, rel_path)
+                    if os.path.exists(target_dir):
+                        try:
+                            if not os.listdir(target_dir):
+                                os.rmdir(target_dir)
+                        except:
+                            pass
+                
+                # 打印禁用成功信息
+                total_count = updated_symlink_count + deleted_symlink_count
+                if total_count > 0 and failed_count == 0:
+                    parts = []
+                    if updated_symlink_count > 0:
+                        parts.append(f"更新 {updated_symlink_count} 个")
+                    if deleted_symlink_count > 0:
+                        parts.append(f"删除 {deleted_symlink_count} 个")
+                    action_desc = "、".join(parts) + "符号链接"
+                    if updated_symlink_count > 0 and next_priority_mod:
+                        print(f"[成功] mod禁用成功: {mod_name} (虚拟映射: {action_desc} -> {next_priority_mod})")
                     else:
-                        print(f"[警告] mod禁用部分成功: {mod_name} (虚拟映射: 更新 {updated_symlink_count} 个符号链接, 失败: {failed_count} 个)")
-                elif deleted_symlink_count > 0 and failed_count == 0:
-                    print(f"[成功] mod禁用成功: {mod_name} (虚拟映射: 删除 {deleted_symlink_count} 个符号链接)")
-                elif deleted_symlink_count > 0 and failed_count > 0:
-                    print(f"[警告] mod禁用部分成功: {mod_name} (虚拟映射: 成功删除 {deleted_symlink_count} 个符号链接, 失败: {failed_count} 个)")
-                elif deleted_count == 0 and updated_symlink_count == 0:
+                        print(f"[成功] mod禁用成功: {mod_name} (虚拟映射: {action_desc})")
+                    # 同步virtual文件夹内容到游戏根目录
+                    self.sync_virtual_to_game_root(game_path)
+                elif total_count > 0 and failed_count > 0:
+                    parts = []
+                    if updated_symlink_count > 0:
+                        parts.append(f"更新 {updated_symlink_count} 个")
+                    if deleted_symlink_count > 0:
+                        parts.append(f"删除 {deleted_symlink_count} 个")
+                    action_desc = "、".join(parts) + "符号链接"
+                    print(f"[警告] mod禁用部分成功: {mod_name} (虚拟映射: {action_desc}, 失败: {failed_count} 个)")
+                    # 即使部分成功，也尝试同步
+                    self.sync_virtual_to_game_root(game_path)
+                elif total_count == 0:
                     print(f"[提示] mod禁用: {mod_name} (未找到需要处理的符号链接)")
+                    # 即使没有找到符号链接，也尝试同步（可能其他mod有变化）
+                    self.sync_virtual_to_game_root(game_path)
+                return True
             else:
-                if deleted_count > 0 and failed_count == 0:
-                    print(f"[成功] mod禁用成功: {mod_name} (物理复制: 删除 {deleted_count} 个文件)")
-                elif deleted_count > 0 and failed_count > 0:
-                    print(f"[警告] mod禁用部分成功: {mod_name} (物理复制: 成功删除 {deleted_count} 个文件, 失败: {failed_count} 个)")
-                elif deleted_count == 0:
-                    print(f"[提示] mod禁用: {mod_name} (未找到需要删除的文件)")
+                # 非虚拟映射模式：使用文件栈逻辑
+                success = self.update_file_stack_for_mod(mod_name, mod_folder_path, False)
+                return success
     
     def check_mod_file_integrity(self, mod_name, mod_folder_path):
-        """检查mod文件完整性，对照XML中的文件结构
-        只检查文件是否存在，不检查文件大小和修改时间（支持重新安装）
-        
-        Returns:
-            dict: {
-                'is_complete': bool,  # 文件是否完整
-                'missing_files': list,  # 缺失的文件列表
-                'extra_files': list,  # 额外的文件列表
-            }
-        """
+        """检查mod文件完整性"""
         result = {
             'is_complete': True,
             'missing_files': [],
@@ -5064,11 +5541,7 @@ class MainWindow(QMainWindow):
             return False
     
     def show_mod_file_modified_dialog(self, mod_name):
-        """显示mod文件被修改的对话框
-        
-        Returns:
-            str: 'cancel', 'save_and_enable', 或 'uninstall'
-        """
+        """显示mod文件被修改的对话框"""
         # 延迟导入ModFileModifiedPanel，兼容打包环境
         try:
             from models.panels import ModFileModifiedPanel
@@ -5226,6 +5699,10 @@ class MainWindow(QMainWindow):
         if result == QDialog.DialogCode.Accepted:
             # 标签已保存，刷新界面
             self.refresh_category_combo()
+            # 如果当前筛选类型是标签，刷新筛选值下拉框
+            if hasattr(self, 'filter_type_combo') and self.filter_type_combo:
+                if self.filter_type_combo.currentText() == "标签":
+                    self.on_filter_type_changed("标签")
             self.refresh_mod_list()
     
     def refresh_category_combo(self):
@@ -5510,8 +5987,8 @@ class MainWindow(QMainWindow):
     def set_mod_favorite_background(self, row):
         """设置mod行的背景色为浅黄色"""
         if row < 0 or row >= self.mod_table.rowCount():
-            return
-        
+                    return
+            
         # 添加到收藏行集合
         if hasattr(self.mod_table, 'favorite_rows'):
             self.mod_table.favorite_rows.add(row)
@@ -5917,6 +6394,9 @@ class MainWindow(QMainWindow):
         """永久卸载mod（删除文件夹和表格行）"""
         import shutil
         
+        # 在卸载前检查是否有唯一的标签需要移除
+        self.check_and_remove_unique_categories(mod_name)
+        
         # 获取项目根目录和mods目录
         project_root = self.get_project_root()
         mods_dir = os.path.join(project_root, "mods")
@@ -5955,23 +6435,128 @@ class MainWindow(QMainWindow):
             except Exception as e:
                 print(f"[警告] 更新mod_states.json失败")
         
+        # 从文件栈中移除该mod
+        self.remove_mod_from_file_stack(mod_name)
+        
+        # 从虚拟映射优先级中移除该mod
+        self.remove_mod_from_priority(mod_name)
+        
         # 从表格中删除行
         self.mod_table.removeRow(row)
+    
+    def check_and_remove_unique_categories(self, mod_name):
+        """检查并询问是否移除唯一的标签
+        
+        Args:
+            mod_name: 要卸载的mod名称
+        """
+        # 获取要卸载的mod的标签
+        uninstalling_mod_categories = set()
+        
+        # 从表格中获取该mod的标签
+        for row in range(self.mod_table.rowCount()):
+            name_item = self.mod_table.item(row, 1)
+            if name_item and name_item.text() == mod_name:
+                category_item = self.mod_table.item(row, 2)
+                if category_item:
+                    category_text = category_item.text().strip()
+                    if category_text and category_text != "未分类":
+                        # 支持多分类（分号分隔）
+                        categories = [cat.strip() for cat in category_text.split(';') if cat.strip()]
+                        uninstalling_mod_categories.update(categories)
+                break
+        
+        if not uninstalling_mod_categories:
+            return  # 没有标签，直接返回
+        
+        # 获取所有已添加的mod及其标签（不包括要卸载的mod）
+        all_mod_categories = {}  # {category: [mod1, mod2, ...]}
+        
+        for row in range(self.mod_table.rowCount()):
+            name_item = self.mod_table.item(row, 1)
+            if not name_item:
+                continue
+            
+            current_mod_name = name_item.text()
+            if current_mod_name == mod_name:
+                continue  # 跳过要卸载的mod
+            
+            category_item = self.mod_table.item(row, 2)
+            if category_item:
+                category_text = category_item.text().strip()
+                if category_text and category_text != "未分类":
+                    # 支持多分类（分号分隔）
+                    categories = [cat.strip() for cat in category_text.split(';') if cat.strip()]
+                    for cat in categories:
+                        if cat not in all_mod_categories:
+                            all_mod_categories[cat] = []
+                        all_mod_categories[cat].append(current_mod_name)
+        
+        # 找出唯一的标签（只有要卸载的mod有这个标签）
+        unique_categories = []
+        for cat in uninstalling_mod_categories:
+            if cat not in all_mod_categories:
+                unique_categories.append(cat)
+        
+        if not unique_categories:
+            return  # 没有唯一的标签，直接返回
+        
+        # 询问用户是否移除这些唯一的标签
+        categories_text = "、".join(unique_categories)
+        if len(unique_categories) == 1:
+            message = f"标签 '{categories_text}' 只有这个mod在使用。\n卸载后是否也要移除这个标签？"
+        else:
+            message = f"以下标签只有这个mod在使用：\n{categories_text}\n卸载后是否也要移除这些标签？"
+        
+        reply = QMessageBox.question(
+            self,
+            "移除唯一标签",
+            message,
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No
+        )
+        
+        if reply == QMessageBox.StandardButton.Yes:
+            # 从categories.json中移除这些标签
+            import json
+            project_root = self.get_project_root()
+            json_dir = os.path.join(project_root, "json")
+            categories_file = os.path.join(json_dir, "categories.json")
+            
+            if os.path.exists(categories_file):
+                try:
+                    with open(categories_file, 'r', encoding='utf-8') as f:
+                        categories = json.load(f)
+                        if not isinstance(categories, list):
+                            categories = []
+                    
+                    # 移除唯一的标签
+                    updated = False
+                    for cat in unique_categories:
+                        if cat in categories:
+                            categories.remove(cat)
+                            updated = True
+                    
+                    if updated:
+                        with open(categories_file, 'w', encoding='utf-8') as f:
+                            json.dump(categories, f, ensure_ascii=False, indent=2)
+                        print(f"[成功] 已移除唯一标签: {categories_text}")
+                        
+                        # 刷新标签下拉框
+                        if hasattr(self, 'category_combo'):
+                            self.refresh_category_combo()
+                except Exception as e:
+                    print(f"[警告] 移除标签失败: {e}")
         
         # 更新统计
         self.update_statistics()
     
     def get_mod_file_paths(self, mod_name, mod_folder_path):
-        """获取mod的所有文件路径（相对于游戏目录）
-        
-        Args:
-            mod_name: mod名称
-            mod_folder_path: mod文件夹路径
-            
-        Returns:
-            set: 文件路径集合（相对于游戏目录）
-        """
+        """获取mod的所有文件路径（相对于游戏目录）"""
         file_paths = set()
+        
+        if not os.path.exists(mod_folder_path):
+            return file_paths
         
         # 跳过modinfo文件夹
         for root, dirs, files in os.walk(mod_folder_path):
@@ -5985,26 +6570,17 @@ class MainWindow(QMainWindow):
             
             for file in files:
                 if rel_path == '.':
-                    file_path = file.replace('\\', '/')
+                    file_path = file
                 else:
-                    file_path = os.path.join(rel_path, file).replace('\\', '/')
+                    file_path = os.path.join(rel_path, file)
+                # 统一路径格式
+                file_path = self.normalize_file_path(file_path)
                 file_paths.add(file_path)
         
         return file_paths
     
     def check_single_mod_conflicts(self, mod_name, mod_folder_path):
-        """检测mod与已启用mod的文件冲突
-        
-        Args:
-            mod_name: 要启用的mod名称
-            mod_folder_path: mod文件夹路径
-            
-        Returns:
-            dict: {
-                'has_conflict': bool,
-                'conflicting_mods': list of str, 发生冲突的mod列表
-            }
-        """
+        """检测mod与已启用mod的文件冲突"""
         # 获取当前mod的文件路径
         current_mod_files = self.get_mod_file_paths(mod_name, mod_folder_path)
         
@@ -6050,7 +6626,7 @@ class MainWindow(QMainWindow):
             mod_folder_path: mod文件夹路径
             
         Returns:
-            str: 'cancel'=取消启用, 'override'=直接覆盖, 'manual'=手动修改
+            str: 'override'=继续启用
         """
         # 检测冲突
         conflict_check = self.check_single_mod_conflicts(mod_name, mod_folder_path)
@@ -6060,62 +6636,39 @@ class MainWindow(QMainWindow):
         
         conflicting_mods = conflict_check['conflicting_mods']
         
-        # 显示冲突处理面板
-        panel = ConflictResolutionPanel(mod_name, conflicting_mods, self)
-        result = panel.exec()
+        # 检查是否使用虚拟映射
+        settings = self.load_advanced_settings()
+        use_virtual_mapping = settings.get('virtual_mapping', False)
         
-        if result == 0:  # 取消启用
-            return 'cancel'
-        elif result == 1:  # 直接覆盖
-            return 'override'
-        elif result == 2:  # 手动修改
-            # 只在虚拟映射开启时显示手动修改界面
-            settings = self.load_advanced_settings()
-            use_virtual_mapping = settings.get('virtual_mapping', False)
-            
-            if not use_virtual_mapping:
-                # 虚拟映射未开启，提示用户
-                from PySide6.QtWidgets import QMessageBox
-                QMessageBox.warning(
-                    self,
-                    "提示",
-                    "手动修改优先级功能仅在虚拟映射模式下可用。\n\n请先启用虚拟映射功能。"
-                )
-                return 'cancel'
-            
-            # 显示优先级调整面板
-            # 加载已保存的优先级（如果有），延续之前的优先级设置
+        if use_virtual_mapping:
+            # 虚拟映射模式：显示优先级调整面板
+            all_conflicting_mods = [mod_name] + conflicting_mods
+            # 加载已保存的优先级（如果有）
             priority_order = self.load_mod_priority(mod_name, conflicting_mods)
-            
             if priority_order:
-                # 使用已保存的优先级顺序（新mod已经在最前面）
                 all_conflicting_mods = priority_order
             else:
-                # 如果没有保存的优先级，新mod默认放在最前面
+                # 新mod默认放在最前面
                 all_conflicting_mods = [mod_name] + conflicting_mods
             
-            priority_panel = PriorityAdjustmentPanel(all_conflicting_mods, self)
-            priority_result, final_order = priority_panel.exec()
+            panel = VirtualMappingPriorityPanel(all_conflicting_mods, self)
+            result, final_order = panel.exec()
             
-            if priority_result == 1 and final_order:
+            if result == QDialog.DialogCode.Accepted and final_order:
                 # 保存优先级顺序
                 self.save_mod_priority(mod_name, final_order)
-                return 'manual'
-            else:
-                return 'cancel'
+        else:
+            # 非虚拟映射模式：只显示冲突信息
+            panel = ConflictResolutionPanel(mod_name, conflicting_mods, self)
+            panel.exec()
         
-        return 'cancel'
+        # 将新启用的mod放在文件栈栈顶（文件栈会自动处理）
+        # 不需要保存优先级，因为文件栈已经处理了
+        
+        return 'override'
     
     def load_mod_priority(self, mod_name, conflicting_mods):
-        """加载mod优先级顺序，延续之前的优先级设置
-        
-        Args:
-            mod_name: 当前要启用的mod名称（新启用的mod，应该放在最前面）
-            conflicting_mods: 冲突mod列表（包括之前已启用的mod）
-            
-        Returns:
-            list or None: 优先级顺序列表，如果没有保存则返回None
-        """
+        """加载mod优先级顺序"""
         import json
         try:
             project_root = self.get_project_root()
@@ -6128,6 +6681,10 @@ class MainWindow(QMainWindow):
             with open(priority_file, 'r', encoding='utf-8') as f:
                 priorities = json.load(f)
             
+            # 验证 priorities 是字典类型
+            if not isinstance(priorities, dict):
+                return None
+                
             # 首先查找完全匹配的优先级配置
             all_mods = [mod_name] + conflicting_mods
             all_mods_set = set(all_mods)
@@ -6208,5 +6765,920 @@ class MainWindow(QMainWindow):
         except Exception as e:
             print(f"[警告] 保存优先级失败: {e}")
 
+    def update_mod_priority_name(self, old_mod_name, new_mod_name):
+        """更新优先级文件中的mod名称
+        
+        Args:
+            old_mod_name: 旧的mod名称
+            new_mod_name: 新的mod名称
+        """
+        import json
+        try:
+            project_root = self.get_project_root()
+            json_dir = os.path.join(project_root, "json")
+            priority_file = os.path.join(json_dir, "mod_priorities.json")
+            
+            if not os.path.exists(priority_file):
+                return
+            
+            with open(priority_file, 'r', encoding='utf-8') as f:
+                priorities = json.load(f)
+            
+            updated = False
+            new_priorities = {}
+            
+            for key, value in priorities.items():
+                # 更新优先级列表中的mod名称
+                if old_mod_name in value:
+                    new_value = [new_mod_name if mod == old_mod_name else mod for mod in value]
+                    new_key = ','.join(sorted(new_value))
+                    new_priorities[new_key] = new_value
+                    updated = True
+                else:
+                    new_priorities[key] = value
+            
+            if updated:
+                with open(priority_file, 'w', encoding='utf-8') as f:
+                    json.dump(new_priorities, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            print(f"[警告] 更新优先级名称失败: {e}")
+    
+    def remove_mod_from_priority(self, mod_name):
+        """从优先级文件中移除mod"""
+        import json
+        try:
+            project_root = self.get_project_root()
+            json_dir = os.path.join(project_root, "json")
+            priority_file = os.path.join(json_dir, "mod_priorities.json")
+            
+            if not os.path.exists(priority_file):
+                return
+            
+            with open(priority_file, 'r', encoding='utf-8') as f:
+                priorities = json.load(f)
+            
+            updated = False
+            new_priorities = {}
+            
+            for key, value in priorities.items():
+                # 如果优先级列表包含该mod，移除它
+                if mod_name in value:
+                    new_value = [mod for mod in value if mod != mod_name]
+                    # 如果移除后列表长度小于2，删除该优先级配置
+                    if len(new_value) >= 2:
+                        new_key = ','.join(sorted(new_value))
+                        new_priorities[new_key] = new_value
+                        updated = True
+                    else:
+                        updated = True  # 标记为已更新，但不添加该配置
+                else:
+                    new_priorities[key] = value
+            
+            if updated:
+                with open(priority_file, 'w', encoding='utf-8') as f:
+                    json.dump(new_priorities, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            print(f"[警告] 从优先级中移除mod失败: {e}")
+
+    def get_virtual_folder_path(self, game_path):
+        """获取virtual文件夹路径"""
+        project_root = self.get_project_root()
+        return os.path.join(project_root, "virtual")
+    
+    def ensure_virtual_folder(self, game_path):
+        """确保virtual文件夹存在"""
+        import subprocess
+        import platform
+        
+        virtual_folder = self.get_virtual_folder_path(game_path)
+        
+        # 如果virtual文件夹不存在，创建它
+        if not os.path.exists(virtual_folder):
+            try:
+                os.makedirs(virtual_folder, exist_ok=True)
+            except Exception as e:
+                print(f"[警告] 创建virtual文件夹失败: {e}")
+                return False
+        
+        # 在Windows下，使用junction将virtual文件夹映射到游戏根目录
+        # 这样游戏访问游戏根目录时，实际访问的是virtual文件夹
+        if platform.system() == "Windows":
+            junction_path = game_path  # junction指向游戏根目录
+            
+            # 检查游戏根目录是否已经是junction
+            try:
+                # 尝试读取junction的目标路径
+                result = subprocess.run(
+                    ['cmd', '/c', 'dir', junction_path],
+                    capture_output=True,
+                    text=True,
+                    shell=True
+                )
+                # 如果游戏根目录存在且不是junction，需要先清空它（但这是危险的）
+                # 实际上，我们应该检查游戏根目录是否为空，或者是否已经是junction
+                
+                # 创建junction：将virtual文件夹映射到游戏根目录
+                # 注意：这需要管理员权限，并且会覆盖游戏根目录
+                # 所以我们使用一个临时目录名，然后重命名
+                temp_junction = game_path + "_junction_temp"
+                
+                # 删除旧的junction（如果存在）
+                if os.path.exists(temp_junction):
+                    try:
+                        subprocess.run(['cmd', '/c', 'rmdir', temp_junction], shell=True, check=False)
+                    except:
+                        pass
+                
+                
+            except Exception as e:
+                print(f"[警告] 检查junction状态失败: {e}")
+        
+        return True
+    
+    def setup_junction_mapping(self, game_path):
+        """设置junction映射"""
+        import subprocess
+        import platform
+        import shutil
+        
+        if platform.system() != "Windows":
+            return False, "此功能仅在Windows系统上可用"
+        
+        # 检查游戏路径是否存在
+        if not os.path.exists(game_path):
+            return False, f"游戏目录不存在: {game_path}"
+        
+        # 检查是否已经是junction
+        try:
+            result = subprocess.run(
+                ['cmd', '/c', 'fsutil', 'reparsepoint', 'query', game_path],
+                capture_output=True,
+                text=True,
+                shell=True
+            )
+            if result.returncode == 0:
+                # 已经是junction，检查是否指向virtual
+                virtual_folder = self.get_virtual_folder_path(game_path)
+                if os.path.exists(virtual_folder):
+                    # 检查junction是否指向virtual
+                    try:
+                        # 使用dir命令检查junction目标
+                        dir_result = subprocess.run(
+                            ['cmd', '/c', 'dir', '/AL', game_path],
+                            capture_output=True,
+                            text=True,
+                            shell=True
+                        )
+                        # 如果已经是junction，可能已经设置好了
+                        return True, "游戏目录已经是junction，可能已经设置完成"
+                    except:
+                        pass
+        except:
+            pass
+        
+        try:
+            # 获取游戏路径的上一级目录
+            parent_dir = os.path.dirname(game_path)
+            game_dir_name = os.path.basename(game_path)
+            
+            # 生成使用非常规空格的名字（不间断空格 U+00A0）
+            # 将普通空格替换为不间断空格
+            hidden_dir_name = game_dir_name.replace(' ', '\u00A0')  # U+00A0 不间断空格
+            hidden_game_path = os.path.join(parent_dir, hidden_dir_name)
+            
+            # 检查隐藏目录是否已存在
+            need_rename = True
+            if os.path.exists(hidden_game_path):
+                # 如果已存在，检查是否是同一个目录（可能是之前设置过的）
+                try:
+                    if os.path.samefile(game_path, hidden_game_path):
+                        # 是同一个目录，说明已经重命名过了
+                        need_rename = False
+                    else:
+                        return False, f"目标目录已存在且不同: {hidden_game_path}"
+                except:
+                    # 如果game_path不存在（可能是junction），检查hidden_game_path是否是实际目录
+                    if os.path.isdir(hidden_game_path) and not os.path.islink(hidden_game_path):
+                        need_rename = False
+                    else:
+                        return False, f"目标目录已存在: {hidden_game_path}"
+            
+            if need_rename:
+                # 重命名游戏目录为使用非常规空格的名字
+                print(f"[信息] 重命名游戏目录: {game_path} -> {hidden_game_path}")
+                os.rename(game_path, hidden_game_path)
+                print(f"[成功] 游戏目录已重命名为: {hidden_dir_name}")
+            
+            # 确保virtual文件夹存在
+            virtual_folder = self.get_virtual_folder_path(game_path)
+            if not os.path.exists(virtual_folder):
+                os.makedirs(virtual_folder, exist_ok=True)
+            
+            # 在virtual中创建原游戏文件的符号链接
+            print(f"[信息] 开始在virtual中创建原游戏文件的符号链接...")
+            game_file_count = 0
+            skipped_count = 0
+            
+            for root, dirs, files in os.walk(hidden_game_path):
+                # 计算相对路径
+                rel_path = os.path.relpath(root, hidden_game_path)
+                
+                # 在virtual中创建对应的目录结构
+                if rel_path == '.':
+                    target_dir_in_virtual = virtual_folder
+                else:
+                    target_dir_in_virtual = os.path.join(virtual_folder, rel_path)
+                
+                os.makedirs(target_dir_in_virtual, exist_ok=True)
+                
+                # 为每个文件创建符号链接
+                for file in files:
+                    source_file = os.path.join(root, file)
+                    target_file_in_virtual = os.path.join(target_dir_in_virtual, file)
+                    
+                    # 如果virtual中已存在该文件（可能是mod文件），跳过
+                    if os.path.exists(target_file_in_virtual):
+                        skipped_count += 1
+                        continue
+                    
+                    try:
+                        source_file_abs = os.path.abspath(source_file)
+                        os.symlink(source_file_abs, target_file_in_virtual)
+                        game_file_count += 1
+                    except OSError as e:
+                        if hasattr(e, 'winerror') and e.winerror == 1314:
+                            return False, f"创建符号链接需要管理员权限: {target_file_in_virtual}"
+                        else:
+                            print(f"[警告] 创建符号链接失败: {target_file_in_virtual} ({str(e)})")
+                    except Exception as e:
+                        print(f"[警告] 创建符号链接失败: {target_file_in_virtual} ({str(e)})")
+            
+            print(f"[成功] 在virtual中创建了 {game_file_count} 个原游戏文件的符号链接，跳过了 {skipped_count} 个已存在的文件")
+            
+            # 创建junction：将游戏目录名指向virtual文件夹
+            # mklink /J "目标路径" "源路径"
+            # 这里目标路径是游戏目录名（使用普通空格），源路径是virtual文件夹
+            print(f"[信息] 创建junction: {game_path} -> {virtual_folder}")
+            
+            # 检查目标路径是否已存在（可能是junction或其他）
+            if os.path.exists(game_path):
+                # 检查是否是junction
+                try:
+                    result = subprocess.run(
+                        ['cmd', '/c', 'fsutil', 'reparsepoint', 'query', game_path],
+                        capture_output=True,
+                        text=True,
+                        shell=True
+                    )
+                    if result.returncode == 0:
+                        # 是junction，先删除
+                        print(f"[信息] 删除已存在的junction: {game_path}")
+                        subprocess.run(['cmd', '/c', 'rmdir', game_path], shell=True, check=True)
+                except:
+                    # 不是junction，可能是普通目录，不能覆盖
+                    return False, f"目标路径已存在且不是junction: {game_path}"
+            
+            # 创建junction
+            result = subprocess.run(
+                ['cmd', '/c', 'mklink', '/J', game_path, virtual_folder],
+                capture_output=True,
+                text=True,
+                shell=True
+            )
+            
+            if result.returncode != 0:
+                error_msg = result.stderr.strip() if result.stderr else "未知错误"
+                if "1314" in error_msg or "权限" in error_msg or "privilege" in error_msg.lower():
+                    return False, "创建junction需要管理员权限，请以管理员身份运行程序"
+                else:
+                    return False, f"创建junction失败: {error_msg}"
+            
+            print(f"[成功] Junction创建成功: {game_path} -> {virtual_folder}")
+            return True, f"设置完成！游戏目录已重命名为隐藏名称，junction已创建。创建了 {game_file_count} 个原游戏文件的符号链接。"
+            
+        except PermissionError as e:
+            return False, f"权限不足: {str(e)}，请以管理员身份运行程序"
+        except Exception as e:
+            return False, f"设置junction映射失败: {str(e)}"
+    
+    def teardown_junction_mapping(self, game_path):
+        """撤销junction映射"""
+        import subprocess
+        import platform
+        
+        if platform.system() != "Windows":
+            return False, "此功能仅在Windows系统上可用"
+        
+        try:
+            # 计算隐藏目录路径（使用不间断空格的目录名）
+            parent_dir = os.path.dirname(game_path)
+            game_dir_name = os.path.basename(game_path)
+            hidden_dir_name = game_dir_name.replace(' ', '\u00A0')
+            hidden_game_path = os.path.join(parent_dir, hidden_dir_name)
+            
+            # 如果当前game_path存在且是junction，先删除junction
+            if os.path.exists(game_path):
+                try:
+                    result = subprocess.run(
+                        ['cmd', '/c', 'fsutil', 'reparsepoint', 'query', game_path],
+                        capture_output=True,
+                        text=True,
+                        shell=True
+                    )
+                    if result.returncode == 0:
+                        # 是junction，删除它
+                        print(f"[信息] 删除junction: {game_path}")
+                        subprocess.run(['cmd', '/c', 'rmdir', game_path], shell=True, check=True)
+                except Exception as e:
+                    return False, f"删除junction失败: {str(e)}"
+            
+            # 将隐藏目录名称改回正常名称
+            if os.path.exists(hidden_game_path) and os.path.isdir(hidden_game_path):
+                # 确保目标路径不存在
+                if os.path.exists(game_path):
+                    return False, f"无法将隐藏目录改名回去，因为目标路径已存在: {game_path}"
+                
+                print(f"[信息] 还原游戏目录名称: {hidden_game_path} -> {game_path}")
+                os.rename(hidden_game_path, game_path)
+                print("[成功] 游戏目录名称已还原为正常名称")
+                return True, "已删除junction并还原游戏目录名称"
+            else:
+                # 找不到隐藏目录，可能已经被手动还原或从未创建过
+                return True, "未找到隐藏的游戏目录，可能已经被还原或未创建过，仅删除了junction（如果存在）"
+        
+        except PermissionError as e:
+            return False, f"权限不足: {str(e)}，请以管理员身份运行程序"
+        except Exception as e:
+            return False, f"撤销junction映射失败: {str(e)}"
+    
+    def sync_virtual_to_game_root(self, game_path):
+        """将virtual文件夹内容同步到游戏根目录"""
+        import subprocess
+        import platform
+        
+        # 如果游戏目录是junction，不需要同步（junction直接指向virtual）
+        if platform.system() == "Windows":
+            try:
+                result = subprocess.run(
+                    ['cmd', '/c', 'fsutil', 'reparsepoint', 'query', game_path],
+                    capture_output=True,
+                    text=True,
+                    shell=True
+                )
+                if result.returncode == 0:
+                    # 是junction，不需要同步
+                    return True
+            except:
+                pass
+        
+        virtual_folder = self.get_virtual_folder_path(game_path)
+        
+        if not os.path.exists(virtual_folder):
+            return True  # virtual文件夹不存在，无需同步
+        
+        try:
+            # 收集virtual文件夹中的所有文件路径
+            virtual_files = set()
+            for root, dirs, files in os.walk(virtual_folder):
+                rel_path = os.path.relpath(root, virtual_folder)
+                for file in files:
+                    if rel_path == '.':
+                        virtual_files.add(file)
+                    else:
+                        virtual_files.add(os.path.join(rel_path, file).replace('\\', '/'))
+            
+            # 遍历游戏根目录，删除指向不存在文件的符号链接
+            if os.path.exists(game_path):
+                for root, dirs, files in os.walk(game_path):
+                    rel_path = os.path.relpath(root, game_path)
+                    for file in files:
+                        target_file = os.path.join(root, file)
+                        if os.path.islink(target_file):
+                            # 检查这个符号链接是否应该存在
+                            if rel_path == '.':
+                                file_rel_path = file
+                            else:
+                                file_rel_path = os.path.join(rel_path, file).replace('\\', '/')
+                            
+                            # 如果virtual文件夹中没有这个文件，删除符号链接
+                            if file_rel_path not in virtual_files:
+                                try:
+                                    os.remove(target_file)
+                                    print(f"[删除] 移除无效符号链接: {file_rel_path}")
+                                except Exception as e:
+                                    print(f"[警告] 删除符号链接失败: {file_rel_path} ({e})")
+            
+            # 遍历virtual文件夹内的所有文件和目录，创建符号链接
+            for root, dirs, files in os.walk(virtual_folder):
+                # 计算相对于virtual_folder的路径
+                rel_path = os.path.relpath(root, virtual_folder)
+                
+                # 在游戏根目录创建对应的目录结构
+                if rel_path == '.':
+                    target_dir = game_path
+                else:
+                    target_dir = os.path.join(game_path, rel_path)
+                
+                # 为每个文件创建符号链接
+                for file in files:
+                    source_file = os.path.join(root, file)
+                    target_file = os.path.join(target_dir, file)
+                    
+                    # 如果目标文件已存在且不是符号链接，跳过（游戏原始文件）
+                    if os.path.exists(target_file) and not os.path.islink(target_file):
+                        continue
+                    
+                    # 如果目标文件是符号链接，先删除
+                    if os.path.islink(target_file):
+                        try:
+                            os.remove(target_file)
+                        except:
+                            pass
+                    
+                    # 创建符号链接
+                    try:
+                        source_file_abs = os.path.abspath(source_file)
+                        os.makedirs(target_dir, exist_ok=True)
+                        os.symlink(source_file_abs, target_file)
+                    except OSError as e:
+                        if hasattr(e, 'winerror') and e.winerror == 1314:
+                            print(f"[警告] 创建符号链接需要管理员权限: {target_file}")
+                        else:
+                            print(f"[警告] 创建符号链接失败: {target_file} ({str(e)})")
+                    except Exception as e:
+                        print(f"[警告] 同步文件失败: {target_file} ({str(e)})")
+            
+            return True
+        except Exception as e:
+            print(f"[警告] 同步virtual文件夹到游戏根目录失败: {e}")
+            return False
+    
+    def load_file_ownership_stack(self):
+        """加载文件归属栈
+        
+        Returns:
+            dict: {文件路径: [mod1, mod2, ...]} 栈底到栈顶
+        """
+        import json
+        import stat
+        try:
+            project_root = self.get_project_root()
+            json_dir = os.path.join(project_root, "json")
+            os.makedirs(json_dir, exist_ok=True)
+            stack_file = os.path.join(json_dir, "file_ownership_stack.json")
+            
+            if os.path.exists(stack_file):
+                try:
+                    with open(stack_file, 'r', encoding='utf-8') as f:
+                        stack = json.load(f)
+                    # 确保文件是只读的（对用户）
+                    try:
+                        os.chmod(stack_file, stat.S_IREAD | stat.S_IWRITE)
+                    except:
+                        pass
+                    return stack
+                except Exception as e:
+                    print(f"[警告] 加载文件归属栈失败: {e}")
+            return {}
+        except Exception as e:
+            print(f"[警告] 加载文件归属栈失败: {e}")
+            return {}
+    
+    def save_file_ownership_stack(self, stack):
+        """保存文件归属栈
+        
+        Args:
+            stack: dict, {文件路径: [mod1, mod2, ...]} 栈底到栈顶
+        """
+        import json
+        import stat
+        try:
+            project_root = self.get_project_root()
+            json_dir = os.path.join(project_root, "json")
+            os.makedirs(json_dir, exist_ok=True)
+            stack_file = os.path.join(json_dir, "file_ownership_stack.json")
+            
+            with open(stack_file, 'w', encoding='utf-8') as f:
+                json.dump(stack, f, ensure_ascii=False, indent=2)
+            
+            # 设置文件为只读（对用户，但程序可以写入）
+            try:
+                # Windows: 只读 + 所有者读写
+                os.chmod(stack_file, stat.S_IREAD | stat.S_IWRITE)
+            except:
+                pass
+        except Exception as e:
+            print(f"[警告] 保存文件归属栈失败: {e}")
+    
+    def normalize_file_path(self, file_path):
+        """统一文件路径格式（使用 '/' 作为分隔符）
+        
+        Args:
+            file_path: 文件路径
+            
+        Returns:
+            str: 标准化后的文件路径
+        """
+        return file_path.replace('\\', '/')
+    
+    def mod_name_to_folder_name(self, mod_name):
+        """将mod名称转换为文件夹名
+        
+        Args:
+            mod_name: mod名称
+            
+        Returns:
+            str: 文件夹名
+        """
+        # 替换所有可能导致问题的字符
+        folder_name = mod_name.replace(" ", "_")
+        folder_name = folder_name.replace("/", "_")
+        folder_name = folder_name.replace("\\", "_")
+        folder_name = folder_name.replace(":", "_")
+        folder_name = folder_name.replace("*", "_")
+        folder_name = folder_name.replace("?", "_")
+        folder_name = folder_name.replace("\"", "_")
+        folder_name = folder_name.replace("<", "_")
+        folder_name = folder_name.replace(">", "_")
+        folder_name = folder_name.replace("|", "_")
+        return folder_name
+    
+    def get_mod_files_from_stack(self, mod_name, stack):
+        """从文件栈中获取指定mod的所有文件路径
+        
+        Args:
+            mod_name: mod名称
+            stack: 文件栈字典
+            
+        Returns:
+            set: 文件路径集合
+        """
+        mod_files = set()
+        for file_path, mod_stack in stack.items():
+            if mod_name in mod_stack:
+                mod_files.add(file_path)
+        return mod_files
+    
+    def cleanup_invalid_stack_entries(self, stack):
+        """清理文件栈中的无效条目"""
+        project_root = self.get_project_root()
+        mods_dir = os.path.join(project_root, "mods")
+        cleaned_stack = {}
+        
+        for file_path, mod_stack in stack.items():
+            valid_mods = []
+            for mod_name in mod_stack:
+                mod_folder_name = self.mod_name_to_folder_name(mod_name)
+                mod_folder_path = os.path.join(mods_dir, mod_folder_name)
+                if os.path.exists(mod_folder_path):
+                    valid_mods.append(mod_name)
+            
+            if valid_mods:
+                cleaned_stack[file_path] = valid_mods
+        
+        return cleaned_stack
+    
+    def update_file_stack_for_mod(self, mod_name, mod_folder_path, enabled):
+        """更新文件栈并复制栈顶文件到游戏目录"""
+        import shutil
+        from PySide6.QtWidgets import QApplication
+        
+        # 禁用窗口响应，防止并发操作
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        self.setEnabled(False)
+        
+        try:
+            settings = self.load_advanced_settings()
+            game_path = settings.get('game_path', '')
+            if not game_path or not os.path.exists(game_path):
+                return False
+            
+            # 加载文件栈
+            stack = self.load_file_ownership_stack()
+            
+            # 清理无效条目
+            stack = self.cleanup_invalid_stack_entries(stack)
+            
+            if enabled:
+                # 启用：先获取文件列表
+                if not os.path.exists(mod_folder_path):
+                    return False
+                
+                mod_files = self.get_mod_file_paths(mod_name, mod_folder_path)
+                if not mod_files:
+                    # 没有文件，直接保存栈并返回成功
+                    self.save_file_ownership_stack(stack)
+                    return True
+                
+                # 先执行所有文件操作，记录操作结果
+                operations = []  # [(file_path, source_file, target_file, success)]
+                new_stack = stack.copy()
+                
+                for file_path in mod_files:
+                    # 标准化路径
+                    file_path = self.normalize_file_path(file_path)
+                    
+                    # 准备栈更新
+                    if file_path not in new_stack:
+                        new_stack[file_path] = []
+                    if mod_name in new_stack[file_path]:
+                        new_stack[file_path].remove(mod_name)
+                    new_stack[file_path].append(mod_name)
+                    
+                    # 准备文件操作
+                    source_file = os.path.join(mod_folder_path, file_path)
+                    target_file = os.path.join(game_path, file_path)
+                    
+                    if os.path.exists(source_file):
+                        try:
+                            target_dir = os.path.dirname(target_file)
+                            if target_dir and target_dir != game_path:
+                                os.makedirs(target_dir, exist_ok=True)
+                            shutil.copy2(source_file, target_file)
+                            operations.append((file_path, source_file, target_file, True))
+                        except Exception as e:
+                            print(f"[失败] 复制文件失败: {file_path} ({str(e)})")
+                            operations.append((file_path, source_file, target_file, False))
+                    else:
+                        operations.append((file_path, source_file, target_file, False))
+                
+                # 检查是否有操作失败
+                failed_operations = [op for op in operations if not op[3]]
+                if failed_operations:
+                    # 回滚：删除已复制的文件
+                    for file_path, source_file, target_file, success in operations:
+                        if success and os.path.exists(target_file):
+                            try:
+                                os.remove(target_file)
+                            except:
+                                pass
+                    print(f"[失败] 部分文件操作失败，已回滚")
+                    return False
+                
+                # 所有操作成功，更新栈
+                stack = new_stack
+                
+                # 打印统计信息
+                file_count = len(operations)
+                copy_count = len([op for op in operations if op[3]])
+                print(f"[成功] {file_count}个文件的{mod_name}入栈，{copy_count}个文件被复制")
+                
+            else:
+                # 禁用：从栈中获取文件列表（而不是重新扫描文件夹）
+                mod_files = self.get_mod_files_from_stack(mod_name, stack)
+                if not mod_files:
+                    # 栈中没有该mod的文件，直接保存并返回成功
+                    self.save_file_ownership_stack(stack)
+                    return True
+                
+                # 先执行所有文件操作
+                operations = []  # [(file_path, action, target_file, success)]
+                new_stack = stack.copy()
+                
+                for file_path in mod_files:
+                    file_path = self.normalize_file_path(file_path)
+                    
+                    if file_path not in new_stack or mod_name not in new_stack[file_path]:
+                        continue
+                    
+                    # 从栈中移除mod
+                    new_stack[file_path].remove(mod_name)
+                    
+                    target_file = os.path.join(game_path, file_path)
+                    
+                    if not new_stack[file_path]:
+                        # 栈为空，删除文件
+                        if os.path.exists(target_file):
+                            try:
+                                os.remove(target_file)
+                                operations.append((file_path, 'delete', target_file, True))
+                            except Exception as e:
+                                print(f"[失败] 删除文件失败: {file_path} ({str(e)})")
+                                operations.append((file_path, 'delete', target_file, False))
+                        else:
+                            operations.append((file_path, 'delete', target_file, True))
+                        # 从栈中删除该文件路径
+                        del new_stack[file_path]
+                    else:
+                        # 栈不为空，复制新的栈顶文件
+                        top_mod = new_stack[file_path][-1]
+                        project_root = self.get_project_root()
+                        mods_dir = os.path.join(project_root, "mods")
+                        top_mod_folder_name = self.mod_name_to_folder_name(top_mod)
+                        top_mod_folder_path = os.path.join(mods_dir, top_mod_folder_name)
+                        source_file = os.path.join(top_mod_folder_path, file_path)
+                        
+                        if os.path.exists(top_mod_folder_path) and os.path.exists(source_file):
+                            try:
+                                target_dir = os.path.dirname(target_file)
+                                if target_dir and target_dir != game_path:
+                                    os.makedirs(target_dir, exist_ok=True)
+                                shutil.copy2(source_file, target_file)
+                                operations.append((file_path, 'restore', target_file, True))
+                            except Exception as e:
+                                print(f"[失败] 恢复文件失败: {file_path} ({str(e)})")
+                                operations.append((file_path, 'restore', target_file, False))
+                        else:
+                            # 栈顶mod文件夹不存在，清理该条目
+                            print(f"[警告] 栈顶mod '{top_mod}' 的文件夹不存在，清理该条目")
+                            del new_stack[file_path]
+                            operations.append((file_path, 'cleanup', target_file, True))
+                
+                # 检查是否有操作失败
+                failed_operations = [op for op in operations if not op[3]]
+                if failed_operations:
+                    print(f"[警告] 部分文件操作失败，但栈已更新")
+                    # 注意：这里不完整回滚，因为栈已经部分更新了
+                
+                # 更新栈
+                stack = new_stack
+                
+                # 打印统计信息
+                file_count = len(mod_files)
+                delete_count = len([op for op in operations if op[1] == 'delete' and op[3]])
+                restore_count = len([op for op in operations if op[1] == 'restore' and op[3]])
+                if delete_count > 0 and restore_count > 0:
+                    print(f"[成功] {file_count}个文件的{mod_name}出栈，{delete_count}个文件被删除，{restore_count}个文件被恢复")
+                elif delete_count > 0:
+                    print(f"[成功] {file_count}个文件的{mod_name}出栈，{delete_count}个文件被删除")
+                elif restore_count > 0:
+                    print(f"[成功] {file_count}个文件的{mod_name}出栈，{restore_count}个文件被恢复")
+                else:
+                    print(f"[成功] {file_count}个文件的{mod_name}出栈")
+            
+            # 保存文件栈
+            self.save_file_ownership_stack(stack)
+            return True
+            
+        except Exception as e:
+            print(f"[警告] 更新文件栈失败: {e}")
+            import traceback
+            traceback.print_exc()
+            return False
+        finally:
+            # 恢复窗口响应
+            self.setEnabled(True)
+            QApplication.restoreOverrideCursor()
+    
+    def update_file_stack_mod_name(self, old_mod_name, new_mod_name):
+        """更新文件栈中的mod名称（重命名时使用）
+        
+        Args:
+            old_mod_name: 旧的mod名称
+            new_mod_name: 新的mod名称
+        """
+        try:
+            stack = self.load_file_ownership_stack()
+            updated = False
+            
+            for file_path, mod_stack in stack.items():
+                if old_mod_name in mod_stack:
+                    # 替换栈中的旧名称为新名称
+                    mod_stack = [new_mod_name if mod == old_mod_name else mod for mod in mod_stack]
+                    stack[file_path] = mod_stack
+                    updated = True
+            
+            if updated:
+                self.save_file_ownership_stack(stack)
+        except Exception as e:
+            print(f"[警告] 更新文件栈中的mod名称失败: {e}")
+    
+    def remove_mod_from_file_stack(self, mod_name):
+        """从文件栈中移除mod（卸载时使用）
+        
+        Args:
+            mod_name: 要移除的mod名称
+        """
+        try:
+            stack = self.load_file_ownership_stack()
+            updated = False
+            
+            for file_path in list(stack.keys()):
+                if mod_name in stack[file_path]:
+                    stack[file_path].remove(mod_name)
+                    # 如果栈为空，删除该文件路径
+                    if not stack[file_path]:
+                        del stack[file_path]
+                    updated = True
+            
+            if updated:
+                self.save_file_ownership_stack(stack)
+        except Exception as e:
+            print(f"[警告] 从文件栈中移除mod失败: {e}")
+    
+    def refresh_virtual_mapping_async(self, priority_order):
+        """异步刷新虚拟映射（根据优先级顺序更新所有符号链接）
+        
+        Args:
+            priority_order: list of str, mod优先级顺序（从高到低）
+        """
+        class RefreshVirtualMappingThread(QThread):
+            """刷新虚拟映射的工作线程"""
+            finished = Signal()
+            error = Signal(str)
+            
+            def __init__(self, parent, priority_order):
+                super().__init__(parent)
+                self.parent_window = parent
+                self.priority_order = priority_order
+            
+            def run(self):
+                try:
+                    settings = self.parent_window.load_advanced_settings()
+                    game_path = settings.get('game_path', '')
+                    if not game_path or not os.path.exists(game_path):
+                        self.error.emit("游戏目录未设置或不存在")
+                        return
+                    
+                    # 确保virtual文件夹存在
+                    if not self.parent_window.ensure_virtual_folder(game_path):
+                        self.error.emit("无法创建virtual文件夹")
+                        return
+                    
+                    virtual_folder = self.parent_window.get_virtual_folder_path(game_path)
+                    project_root = self.parent_window.get_project_root()
+                    mods_dir = os.path.join(project_root, "mods")
+                    
+                    # 收集所有冲突文件
+                    conflict_files = {}  # {file_path: [mod1, mod2, ...]}
+                    
+                    for mod_name in self.priority_order:
+                        mod_folder_name = self.parent_window.mod_name_to_folder_name(mod_name)
+                        mod_folder_path = os.path.join(mods_dir, mod_folder_name)
+                        
+                        if not os.path.exists(mod_folder_path):
+                            continue
+                        
+                        mod_files = self.parent_window.get_mod_file_paths(mod_name, mod_folder_path)
+                        for file_path in mod_files:
+                            file_path = self.parent_window.normalize_file_path(file_path)
+                            if file_path not in conflict_files:
+                                conflict_files[file_path] = []
+                            if mod_name not in conflict_files[file_path]:
+                                conflict_files[file_path].append(mod_name)
+                    
+                    # 根据优先级顺序，为每个文件创建栈顶mod的符号链接
+                    for file_path, mod_stack in conflict_files.items():
+                        # 找到优先级最高的mod（在priority_order中排在最前面的）
+                        top_mod = None
+                        for mod in self.priority_order:
+                            if mod in mod_stack:
+                                top_mod = mod
+                                break
+                        
+                        if not top_mod:
+                            continue
+                        
+                        # 获取栈顶mod的文件
+                        top_mod_folder_name = self.parent_window.mod_name_to_folder_name(top_mod)
+                        top_mod_folder_path = os.path.join(mods_dir, top_mod_folder_name)
+                        source_file = os.path.join(top_mod_folder_path, file_path)
+                        target_file = os.path.join(virtual_folder, file_path)
+                        
+                        if os.path.exists(source_file):
+                            try:
+                                # 删除旧的符号链接或文件
+                                if os.path.exists(target_file):
+                                    if os.path.islink(target_file) or os.path.isfile(target_file):
+                                        os.remove(target_file)
+                                
+                                # 创建目录
+                                target_dir = os.path.dirname(target_file)
+                                if target_dir and target_dir != virtual_folder:
+                                    os.makedirs(target_dir, exist_ok=True)
+                                
+                                # 创建新的符号链接
+                                source_file_abs = os.path.abspath(source_file)
+                                os.symlink(source_file_abs, target_file)
+                            except OSError as e:
+                                if hasattr(e, 'winerror') and e.winerror == 1314:
+                                    self.error.emit(f"创建符号链接需要管理员权限: {file_path}")
+                                else:
+                                    self.error.emit(f"创建符号链接失败: {file_path} ({str(e)})")
+                            except Exception as e:
+                                self.error.emit(f"操作失败: {file_path} ({str(e)})")
+                    
+                    # 刷新完成后，同步virtual文件夹内容到游戏根目录
+                    self.parent_window.sync_virtual_to_game_root(game_path)
+                    
+                    self.finished.emit()
+                except Exception as e:
+                    self.error.emit(f"刷新虚拟映射失败: {str(e)}")
+        
+        # 创建工作线程
+        thread = RefreshVirtualMappingThread(self, priority_order)
+        # 使用一个标志来避免重复打印
+        if not hasattr(self, '_virtual_mapping_refresh_in_progress'):
+            self._virtual_mapping_refresh_in_progress = False
+        
+        def on_finished():
+            if not self._virtual_mapping_refresh_in_progress:
+                print("[成功] 虚拟映射刷新完成")
+            self._virtual_mapping_refresh_in_progress = False
+        
+        thread.finished.connect(on_finished)
+        thread.error.connect(lambda msg: print(f"[警告] {msg}"))
+        self._virtual_mapping_refresh_in_progress = True
+        thread.start()
 
 

@@ -1,16 +1,16 @@
 {
-  "真白 拥抱光芒 替换霜漂": {
-    "enabled": true,
-    "favorite": false,
-    "ignored": false
-  },
-  "仓田真白(透过镜头的羞涩+v1)": {
+  "stracker's loader前置": {
     "enabled": true,
     "favorite": false,
     "ignored": false
   },
   "仓田真白(勇敢的一步+v1)": {
-    "enabled": true,
+    "enabled": false,
+    "favorite": false,
+    "ignored": false
+  },
+  "仓田真白(透过镜头的羞涩+v1)": {
+    "enabled": false,
     "favorite": false,
     "ignored": false
   }
